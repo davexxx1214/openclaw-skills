@@ -1,0 +1,18 @@
+# Alpaca Live Trading Skill - API 配置模板
+# 复制此文件为 config.yaml 并填入真实的 API Key
+#   cp config.example.yaml config.yaml
+
+# AlphaVantage API - 用于获取股价数据和市场新闻
+# 申请地址: https://www.alphavantage.co/support/#api-key
+alphavantage:
+  api_key: "your_alphavantage_api_key"
+
+# Alpaca Trading API - 用于查询账户和执行交易
+# 申请地址: https://app.alpaca.markets/paper/dashboard/overview
+# paper: true 表示模拟交易，false 表示真实交易
+alpaca:
+  api_key: "your_alpaca_api_key"
+  secret_key: "your_alpaca_secret_key"
+  paper: true
+
+# Polymarket - 不需要 API Key（公开 API）
