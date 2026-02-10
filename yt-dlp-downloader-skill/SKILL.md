@@ -86,7 +86,37 @@ yt-dlp -P "~/Downloads/yt-dlp" -f "bestvideo[height<=1080]+bestaudio/best[height
 yt-dlp -P "~/Downloads/yt-dlp" -f "bestvideo+bestaudio/best" "VIDEO_URL"
 ```
 
-### 5. List Available Formats (Before Download)
+### 5. Telegram 16MB Limit (Prefer <=16M)
+
+**优先选择小于 16MB 的格式（推荐）：**
+```bash
+# Prefer formats with known filesize <= 16M, fallback to smaller resolution
+yt-dlp -P "~/Downloads/yt-dlp" -f "best[filesize<=16M]/best[filesize_approx<=16M]/best[height<=480]" --merge-output-format mp4 "VIDEO_URL"
+```
+
+**如果仍然超过 16MB，则用 ffmpeg 压缩：**
+```bash
+# Re-encode with lower bitrate/resolution for Telegram
+ffmpeg -i "input.mp4" -vf "scale=-2:720" -c:v libx264 -preset veryfast -crf 28 -c:a aac -b:a 96k -movflags +faststart "output-16m.mp4"
+```
+> 说明：若仍超限，把 `-crf` 调大到 30-32，或把 `scale` 调到 480p。
+
+**更稳的 16MB 控制（按时长计算目标码率，建议两遍压缩）：**
+```bash
+# 1) 读取时长（秒）
+DURATION=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "input.mp4")
+
+# 2) 计算目标视频码率（bit/s）
+# 16MB * 8 / duration - 96k(audio)
+VBPS=$(awk -v size=16777216 -v dur="$DURATION" 'BEGIN{printf "%.0f", (size*8/dur) - 96000}')
+
+# 3) 两遍压缩（macOS/Linux 用 /dev/null，Windows 用 NUL）
+ffmpeg -y -i "input.mp4" -c:v libx264 -b:v "${VBPS}" -pass 1 -an -f mp4 /dev/null
+ffmpeg -i "input.mp4" -c:v libx264 -b:v "${VBPS}" -pass 2 -c:a aac -b:a 96k -movflags +faststart "output-16m.mp4"
+```
+> 提示：如果结果仍略超限，把 `size` 降到 15500000 或把音频码率降到 64k。
+
+### 6. List Available Formats (Before Download)
 
 ```bash
 yt-dlp -F "VIDEO_URL"
@@ -97,7 +127,7 @@ Then download specific format by ID:
 yt-dlp -P "~/Downloads/yt-dlp" -f FORMAT_ID "VIDEO_URL"
 ```
 
-### 6. Download Playlist
+### 7. Download Playlist
 
 ```bash
 # Download entire playlist
@@ -107,7 +137,7 @@ yt-dlp -P "~/Downloads/yt-dlp" -o "%(playlist)s/%(playlist_index)s - %(title)s.%
 yt-dlp -P "~/Downloads/yt-dlp" -I 1:5 "PLAYLIST_URL"
 ```
 
-### 7. Download with Thumbnail
+### 8. Download with Thumbnail
 
 ```bash
 yt-dlp -P "~/Downloads/yt-dlp" --write-thumbnail "VIDEO_URL"
