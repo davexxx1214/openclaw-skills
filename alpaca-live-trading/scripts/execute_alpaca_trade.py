@@ -18,7 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -31,6 +31,11 @@ try:
 except ImportError:
     print("❌ 缺少 alpaca-py，请安装: pip install alpaca-py")
     raise SystemExit(1)
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    ZoneInfo = None
 
 
 DEFAULT_POSITION_SYMBOLS = [
@@ -50,6 +55,30 @@ DEFAULT_POSITION_SYMBOLS = [
 def resolve_skill_data_dir() -> Path:
     # skills/alpaca-live-trading/scripts -> skills/alpaca-live-trading/data
     return Path(__file__).resolve().parent.parent / "data"
+
+
+def get_dual_timestamps(order) -> Dict[str, str]:
+    """
+    生成双时区时间戳，避免跨机器时区漂移。
+    优先使用 Alpaca 订单成交时间。
+    """
+    dt = getattr(order, "filled_at", None)
+    if dt is None:
+        dt = datetime.now(timezone.utc)
+    elif dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+
+    if ZoneInfo is not None:
+        et_dt = dt.astimezone(ZoneInfo("US/Eastern"))
+    else:
+        # fallback: 若极端情况下不可用 zoneinfo，则保留 UTC，避免脚本失败
+        et_dt = dt.astimezone(timezone.utc)
+
+    return {
+        "date": et_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        "timestamp_et": et_dt.isoformat(timespec="seconds"),
+        "timestamp_utc": dt.astimezone(timezone.utc).isoformat(timespec="seconds"),
+    }
 
 
 def normalize_positions(raw_positions: Dict[str, Any]) -> Dict[str, Any]:
@@ -161,7 +190,7 @@ def main() -> None:
     normalized_positions = build_positions_from_alpaca(account, positions)
     positions_details = build_positions_details(positions)
 
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ts = get_dual_timestamps(order)
     base_dir = resolve_skill_data_dir()
     position_file = base_dir / "position" / "position.jsonl"
     balance_file = base_dir / "balance" / "balance.jsonl"
@@ -170,7 +199,9 @@ def main() -> None:
     append_jsonl(
         position_file,
         {
-            "date": now,
+            "date": ts["date"],
+            "timestamp_et": ts["timestamp_et"],
+            "timestamp_utc": ts["timestamp_utc"],
             "id": next_id,
             "this_action": {
                 "action": args.action,
@@ -187,13 +218,17 @@ def main() -> None:
     append_jsonl(
         balance_file,
         {
-            "date": now,
+            "date": ts["date"],
+            "timestamp_et": ts["timestamp_et"],
+            "timestamp_utc": ts["timestamp_utc"],
             "trade": {
                 "action": args.action,
                 "symbol": symbol,
                 "qty": args.qty,
                 "filled_price": filled_price,
                 "order_id": str(order.id),
+                "filled_at_et": ts["timestamp_et"],
+                "filled_at_utc": ts["timestamp_utc"],
             },
             "account": {
                 "account_number": account.account_number,

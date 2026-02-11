@@ -225,6 +225,7 @@ python skills/alpaca-live-trading/scripts/execute_alpaca_trade.py --action buy -
 - `account`：账户总览（cash, buying_power, equity, portfolio_value 等）
 - `positions`：每只持仓明细（symbol, qty, avg_entry_price, current_price, market_value, unrealized_pl）
 - `trade`：本次交易信息（action, symbol, qty, filled_price, order_id）
+- 时间字段：同时保留 `timestamp_et`（US/Eastern）和 `timestamp_utc`（UTC），用于跨机器时间同步与防漂移
 
 ### 6. 查询最近 N 条统一交易记录（默认 50 条）
 
@@ -242,6 +243,7 @@ python skills/alpaca-live-trading/scripts/query_trade_records.py --json
 该脚本会读取并统一展示：
 - `position.jsonl`（动作 + 持仓快照）
 - `balance.jsonl`（账户总览 + 持仓明细）
+- 并优先按 `timestamp_utc` 排序（兼容旧数据）
 
 ### 7. 重置本地账户记录状态（清理 jsonl）
 

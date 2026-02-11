@@ -84,6 +84,13 @@ def _fallback_key(date: Any, action: Any, symbol: Any, amount: Any) -> str:
     return f"{date}|{str(action).lower()}|{str(symbol).upper()}|{amount}"
 
 
+def _record_time_key(row: Dict[str, Any]) -> str:
+    """
+    排序优先级：UTC -> ET -> date（兼容旧数据）
+    """
+    return str(row.get("timestamp_utc") or row.get("timestamp_et") or row.get("date") or "")
+
+
 def unified_records(
     position_rows: List[Dict[str, Any]],
     balance_rows: List[Dict[str, Any]],
@@ -119,6 +126,8 @@ def unified_records(
         merged.append(
             {
                 "date": p.get("date"),
+                "timestamp_et": p.get("timestamp_et"),
+                "timestamp_utc": p.get("timestamp_utc"),
                 "id": p.get("id"),
                 "action": action.get("action"),
                 "symbol": action.get("symbol"),
@@ -153,6 +162,8 @@ def unified_records(
         merged.append(
             {
                 "date": b.get("date"),
+                "timestamp_et": b.get("timestamp_et"),
+                "timestamp_utc": b.get("timestamp_utc"),
                 "id": None,
                 "action": trade.get("action"),
                 "symbol": trade.get("symbol"),
@@ -169,7 +180,7 @@ def unified_records(
 
     # 按日期 + id 排序
     def sort_key(x: Dict[str, Any]):
-        return (str(x.get("date", "")), int(x.get("id") or 0))
+        return (_record_time_key(x), int(x.get("id") or 0))
 
     merged.sort(key=sort_key)
     return merged
@@ -187,6 +198,8 @@ def print_human_readable(rows: List[Dict[str, Any]], limit: int) -> None:
 
     for idx, row in enumerate(rows, 1):
         print(f"[{idx}] {row.get('date')} | id={row.get('id')}")
+        if row.get("timestamp_et") or row.get("timestamp_utc"):
+            print(f"  时间: ET={row.get('timestamp_et') or 'N/A'} | UTC={row.get('timestamp_utc') or 'N/A'}")
         print(
             f"  交易: {str(row.get('action', '')).upper()} "
             f"{row.get('symbol')} x {row.get('amount')} @ {format_currency(row.get('price'))}"
