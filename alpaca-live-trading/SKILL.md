@@ -6,18 +6,19 @@ AI 实时交易技能 - 使用 Alpaca Paper Trading 进行美股交易决策。
 
 此技能提供一组独立的 Python 查询脚本，用于获取交易决策所需的各类数据。所有脚本可独立运行，不依赖任何 MCP 服务或项目主服务。
 
-交易决策所需数据：
-1. **获取股价数据** - 通过 AlphaVantage API 获取 NASDAQ 100 成分股的实时价格
+交易决策与执行所需数据：
+1. **获取股价数据** - 通过 TradingView tvscreener 获取 NASDAQ 100 成分股的实时价格
 2. **获取市场新闻** - 通过 AlphaVantage NEWS_SENTIMENT API 获取市场新闻和情绪分析
 3. **获取市场情绪** - 通过 Polymarket 获取预测市场情绪指标
 4. **查询账户状态** - 通过 Alpaca API 获取当前持仓和账户余额
+5. **执行交易并落盘** - 每次交易后同步更新 `position.jsonl` 与 `balance.jsonl`
 
 ## 环境配置
 
 ### 1. 安装 Python 依赖
 
 ```bash
-pip install requests pyyaml alpaca-py
+pip install requests pyyaml alpaca-py tvscreener
 ```
 
 ### 2. 配置 API Keys
@@ -51,7 +52,20 @@ alpaca:
 
 以下脚本均可独立运行，所有脚本位于 `skills/alpaca-live-trading/scripts/` 目录。
 
-### 1. 查询股价数据 (AlphaVantage)
+## 交易执行与记录规则（重要）
+
+每次执行交易（buy/sell）时，必须遵循以下流程：
+
+1. 下单（Alpaca）
+2. 订单成交后，重新查询 Alpaca 账户真实状态（账户概览 + 全部持仓）
+3. 读取并更新 `position.jsonl`
+4. 读取并更新 `balance.jsonl`
+
+其中：
+- `position.jsonl`：记录每笔动作及交易后持仓快照（用于策略/回测一致性）
+- `balance.jsonl`：记录交易后账户总览和每只持仓的成本、现价、市值、盈亏（用于资金追踪）
+
+### 1. 查询股价数据 (TradingView tvscreener)
 
 ```bash
 # 查询 NASDAQ 100 + QQQ (共 101 只) 的实时价格
@@ -76,7 +90,10 @@ CTSH, CSGP, KHC, ODFL, DXCM, TTD, ON, BIIB, LULU, CDW, GFS,
 QQQ
 ```
 
-> 注意：AlphaVantage 免费版限制 5 次/分钟，查询 101 只股票会触发限速，建议分批或升级额度。
+> 注意：该脚本使用 TradingView tvscreener，无需 AlphaVantage 限速配置。
+
+**查询结果会更新到：**
+`skills/alpaca-live-trading/data/stock_prices_latest.json`
 
 **输出示例：**
 ```
@@ -187,6 +204,61 @@ python skills/alpaca-live-trading/scripts/query_alpaca_account.py --json
 总未实现盈亏: +$135.50
 ```
 
+### 5. 执行交易并同步 `position.jsonl` / `balance.jsonl`
+
+```bash
+# 买入
+python skills/alpaca-live-trading/scripts/execute_alpaca_trade.py --action buy --symbol AAPL --qty 1
+
+# 卖出
+python skills/alpaca-live-trading/scripts/execute_alpaca_trade.py --action sell --symbol AAPL --qty 1
+
+# 输出 JSON
+python skills/alpaca-live-trading/scripts/execute_alpaca_trade.py --action buy --symbol NVDA --qty 2 --json
+```
+
+**交易后更新文件（skill 内部目录）：**
+- `skills/alpaca-live-trading/data/position/position.jsonl`
+- `skills/alpaca-live-trading/data/balance/balance.jsonl`
+
+`balance.jsonl` 每条记录包含：
+- `account`：账户总览（cash, buying_power, equity, portfolio_value 等）
+- `positions`：每只持仓明细（symbol, qty, avg_entry_price, current_price, market_value, unrealized_pl）
+- `trade`：本次交易信息（action, symbol, qty, filled_price, order_id）
+
+### 6. 查询最近 N 条统一交易记录（默认 50 条）
+
+```bash
+# 默认最近 50 条
+python skills/alpaca-live-trading/scripts/query_trade_records.py
+
+# 查询最近 20 条
+python skills/alpaca-live-trading/scripts/query_trade_records.py --limit 20
+
+# 输出 JSON
+python skills/alpaca-live-trading/scripts/query_trade_records.py --json
+```
+
+该脚本会读取并统一展示：
+- `position.jsonl`（动作 + 持仓快照）
+- `balance.jsonl`（账户总览 + 持仓明细）
+
+### 7. 重置本地账户记录状态（清理 jsonl）
+
+```bash
+# 重置单 agent 记录文件（会二次确认）
+python skills/alpaca-live-trading/scripts/reset_account_state.py
+
+# 跳过确认直接执行
+python skills/alpaca-live-trading/scripts/reset_account_state.py --yes
+```
+
+该指令会删除：
+- `skills/alpaca-live-trading/data/position/position.jsonl`
+- `skills/alpaca-live-trading/data/balance/balance.jsonl`
+
+> 注意：只会清理本地记录文件，不会修改 Alpaca 真实账户持仓与余额。下次交易会自动重新创建这两个文件。
+
 ## 文件结构
 
 ```
@@ -199,7 +271,10 @@ skills/alpaca-live-trading/
     ├── query_stock_prices.py           # 查询实时股价
     ├── query_market_news.py            # 查询市场新闻和情绪
     ├── query_polymarket_sentiment.py   # 查询 Polymarket 预测市场情绪
-    └── query_alpaca_account.py         # 查询 Alpaca 账户状态和持仓
+    ├── query_alpaca_account.py         # 查询 Alpaca 账户状态和持仓
+    ├── execute_alpaca_trade.py         # 执行交易并更新 position/balance
+    ├── query_trade_records.py          # 查询最近 N 条统一交易记录
+    └── reset_account_state.py          # 重置本地账户记录（删除 jsonl）
 ```
 
 ## 故障排查
