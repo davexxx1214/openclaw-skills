@@ -38,9 +38,38 @@ DEFAULT_SYMBOLS = [
     "QQQ"
 ]
 
+# 技术面指标字段（按日线）
+TECHNICAL_FIELDS = {
+    "rsi_14": "RSI_1",
+    "macd": "MACD_MACD_1",
+    "macd_signal": "MACD_SIGNAL_1",
+    "sma20": "SMA20_1",
+    "sma50": "SMA50_1",
+    "ema20": "EMA20_1",
+    "ema50": "EMA50_1",
+    "recommend_all": "RECOMMEND_ALL_1",
+    "recommend_ma": "RECOMMEND_MA_1",
+    "recommend_other": "RECOMMEND_OTHER_1",
+}
+
 
 def _normalize_symbol(symbol: str) -> str:
     return symbol.strip().upper()
+
+
+def _resolve_technical_stock_fields():
+    fields = []
+    resolved_keys = {}
+    for key, field_name in TECHNICAL_FIELDS.items():
+        if hasattr(StockField, field_name):
+            field_obj = getattr(StockField, field_name)
+            fields.append(field_obj)
+            raw_value = getattr(field_obj, "value", str(field_obj))
+            if isinstance(raw_value, tuple) and raw_value:
+                resolved_keys[key] = str(raw_value[0])
+            else:
+                resolved_keys[key] = str(raw_value)
+    return fields, resolved_keys
 
 
 def _load_market_snapshot() -> Any:
@@ -53,12 +82,14 @@ def _load_market_snapshot() -> Any:
     ss = StockScreener()
     ss.set_markets(Market.AMERICA)
     ss.set_range(0, 5000)
-    ss.select(
+    tech_fields, _ = _resolve_technical_stock_fields()
+    base_fields = [
         StockField.NAME,
         StockField.PRICE,
         StockField.CHANGE_PERCENT,
         StockField.VOLUME,
-    )
+    ]
+    ss.select(*(base_fields + tech_fields))
     return ss.get()
 
 
@@ -76,17 +107,33 @@ def get_quote(symbol: str, snapshot) -> Dict[str, Any]:
     if snapshot is None:
         return {"error": "tvscreener 未就绪"}
 
-    token = symbol.split(":")[-1]
-    row = snapshot[snapshot["Symbol"] == symbol]
+    token = symbol.split(":")[-1].upper()
+    symbol_col = "Symbol" if "Symbol" in snapshot.columns else None
+    row = snapshot[snapshot[symbol_col] == symbol] if symbol_col else snapshot.iloc[0:0]
+    if row.empty and symbol_col:
+        row = snapshot[snapshot[symbol_col].astype(str).str.upper() == token]
+    if row.empty and symbol_col:
+        row = snapshot[snapshot[symbol_col].astype(str).str.upper().str.endswith(f":{token}")]
     if row.empty and "Name" in snapshot.columns:
-        row = snapshot[snapshot["Name"].astype(str) == token]
+        row = snapshot[snapshot["Name"].astype(str).str.upper() == token]
 
     if row.empty:
         return {"error": "无数据"}
 
     payload = row.iloc[0].to_dict()
-    price = float(payload.get("Price") or 0)
-    change_pct = float(payload.get("Change %") or 0)
+
+    def _lookup(col_name: str):
+        if col_name in payload:
+            return payload.get(col_name)
+        # 兼容大小写差异
+        for k, v in payload.items():
+            if str(k).lower() == str(col_name).lower():
+                return v
+        return None
+
+    _, tech_col_map = _resolve_technical_stock_fields()
+    price = float(_lookup("Price") or 0)
+    change_pct = float(_lookup("Change %") or 0)
     change = price * change_pct / 100 if price else 0.0
 
     return {
@@ -94,7 +141,19 @@ def get_quote(symbol: str, snapshot) -> Dict[str, Any]:
         "price": price,
         "change": change,
         "change_pct": change_pct,
-        "volume": float(payload.get("Volume") or 0),
+        "volume": float(_lookup("Volume") or 0),
+        "technical": {
+            "rsi_14": _lookup(tech_col_map.get("rsi_14", "")),
+            "macd": _lookup(tech_col_map.get("macd", "")),
+            "macd_signal": _lookup(tech_col_map.get("macd_signal", "")),
+            "sma20": _lookup(tech_col_map.get("sma20", "")),
+            "sma50": _lookup(tech_col_map.get("sma50", "")),
+            "ema20": _lookup(tech_col_map.get("ema20", "")),
+            "ema50": _lookup(tech_col_map.get("ema50", "")),
+            "recommend_all": _lookup(tech_col_map.get("recommend_all", "")),
+            "recommend_ma": _lookup(tech_col_map.get("recommend_ma", "")),
+            "recommend_other": _lookup(tech_col_map.get("recommend_other", "")),
+        },
     }
 
 

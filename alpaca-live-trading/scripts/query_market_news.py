@@ -12,6 +12,7 @@
 import sys
 import json
 import argparse
+import time
 import requests
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -26,6 +27,7 @@ from _config import load_config, get_alphavantage_key
 _config = load_config()
 APIKEY = get_alphavantage_key(_config)
 BASE_URL = "https://www.alphavantage.co/query"
+DEFAULT_ALPHA_REQUEST_INTERVAL = 0.8  # 付费版 75 次/分钟
 
 # 支持的新闻主题
 SUPPORTED_TOPICS = [
@@ -34,6 +36,105 @@ SUPPORTED_TOPICS = [
     "energy_transportation", "finance", "life_sciences", "manufacturing",
     "real_estate", "retail_wholesale", "technology"
 ]
+
+
+def _split_tickers(tickers: Optional[str]) -> List[str]:
+    if not tickers:
+        return []
+    return [t.strip().upper() for t in tickers.split(",") if t.strip()]
+
+
+def _extract_ticker_sentiment(article: Dict[str, Any], ticker: str) -> Optional[float]:
+    ticker = ticker.upper()
+    for item in article.get("ticker_sentiment", []):
+        if str(item.get("ticker", "")).upper() == ticker:
+            try:
+                return float(item.get("ticker_sentiment_score"))
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def fetch_news_per_ticker(
+    tickers: List[str],
+    per_ticker_limit: int = 5,
+    topics: Optional[str] = None,
+    time_from: Optional[str] = None,
+    time_to: Optional[str] = None,
+    sort: str = "LATEST",
+    request_interval: float = 0.0,
+) -> List[Dict[str, Any]]:
+    """
+    逐只股票查询新闻，返回按 ticker 分组结果（分析前置场景）。
+    """
+    grouped_results: List[Dict[str, Any]] = []
+    for idx, ticker in enumerate(tickers):
+        articles = fetch_news(
+            tickers=ticker,
+            topics=topics,
+            time_from=time_from,
+            time_to=time_to,
+            sort=sort,
+            limit=per_ticker_limit,
+        )
+
+        normalized_articles: List[Dict[str, Any]] = []
+        overall_scores: List[float] = []
+        ticker_scores: List[float] = []
+
+        for a in articles:
+            try:
+                overall_score = float(a.get("overall_sentiment_score", 0))
+                overall_scores.append(overall_score)
+            except (TypeError, ValueError):
+                overall_score = None
+
+            ticker_score = _extract_ticker_sentiment(a, ticker)
+            if ticker_score is not None:
+                ticker_scores.append(ticker_score)
+
+            normalized_articles.append(
+                {
+                    "title": a.get("title", ""),
+                    "url": a.get("url", ""),
+                    "source": a.get("source", ""),
+                    "time_published": a.get("time_published", ""),
+                    "time_published_readable": parse_time_published(a.get("time_published", "")),
+                    "overall_sentiment_label": a.get("overall_sentiment_label", ""),
+                    "overall_sentiment_score": overall_score,
+                    "target_ticker_sentiment_score": ticker_score,
+                    "target_ticker_sentiment_label": (
+                        next(
+                            (
+                                s.get("ticker_sentiment_label", "")
+                                for s in a.get("ticker_sentiment", [])
+                                if str(s.get("ticker", "")).upper() == ticker
+                            ),
+                            "",
+                        )
+                    ),
+                    "summary": a.get("summary", ""),
+                }
+            )
+
+        grouped_results.append(
+            {
+                "ticker": ticker,
+                "news_count": len(normalized_articles),
+                "avg_overall_sentiment_score": (
+                    round(sum(overall_scores) / len(overall_scores), 6) if overall_scores else None
+                ),
+                "avg_ticker_sentiment_score": (
+                    round(sum(ticker_scores) / len(ticker_scores), 6) if ticker_scores else None
+                ),
+                "articles": normalized_articles,
+            }
+        )
+
+        if request_interval > 0 and idx < len(tickers) - 1:
+            time.sleep(request_interval)
+
+    return grouped_results
 
 
 def fetch_news(
@@ -226,6 +327,29 @@ def main():
                         help="显示详细信息（个股情绪、主题等）")
     parser.add_argument("--json", action="store_true",
                         help="以 JSON 格式输出")
+    parser.add_argument(
+        "--per-ticker",
+        action="store_true",
+        help="按股票逐个查询并分组输出（分析前推荐模式）",
+    )
+    parser.add_argument(
+        "--per-ticker-limit",
+        type=int,
+        default=5,
+        help="逐股票模式下，每只股票返回条数（默认: 5）",
+    )
+    parser.add_argument(
+        "--request-interval",
+        type=float,
+        default=DEFAULT_ALPHA_REQUEST_INTERVAL,
+        help="逐股票模式下，每次 API 调用间隔秒数（默认: 0.8，约 75次/分钟）",
+    )
+    parser.add_argument(
+        "--output-file",
+        type=str,
+        default="",
+        help="将结果写入指定 JSON 文件（可选）",
+    )
     args = parser.parse_args()
 
     print("📰 市场新闻与情绪查询")
@@ -250,20 +374,70 @@ def main():
 
     try:
         print(f"\n获取最近 {args.days} 天的新闻...\n")
-        articles = fetch_news(
-            tickers=args.tickers,
-            topics=args.topics,
-            time_from=time_from,
-            time_to=time_to,
-            sort=args.sort,
-            limit=min(args.limit, 50),
-        )
+        if args.per_ticker:
+            parsed_tickers = _split_tickers(args.tickers)
+            if not parsed_tickers:
+                raise Exception("逐股票模式必须提供 --tickers，例如 --tickers NVDA,MSFT,AAPL")
 
-        if args.json:
-            print(json.dumps(articles, indent=2, ensure_ascii=False))
+            per_ticker_limit = max(1, min(args.per_ticker_limit, 50))
+            grouped = fetch_news_per_ticker(
+                tickers=parsed_tickers,
+                per_ticker_limit=per_ticker_limit,
+                topics=args.topics,
+                time_from=time_from,
+                time_to=time_to,
+                sort=args.sort,
+                request_interval=max(args.request_interval, 0.0),
+            )
+
+            payload = {
+                "mode": "per_ticker",
+                "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "days": args.days,
+                "sort": args.sort,
+                "per_ticker_limit": per_ticker_limit,
+                "tickers": parsed_tickers,
+                "results": grouped,
+            }
+
+            if args.output_file:
+                out_path = Path(args.output_file)
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+                print(f"💾 已写入: {out_path}")
+
+            if args.json:
+                print(json.dumps(payload, indent=2, ensure_ascii=False))
+            else:
+                for item in grouped:
+                    ticker = item["ticker"]
+                    print(f"📌 {ticker} | 新闻数: {item['news_count']}")
+                    if item["avg_overall_sentiment_score"] is not None:
+                        print(f"  平均新闻情绪: {item['avg_overall_sentiment_score']:+.3f}")
+                    if item["avg_ticker_sentiment_score"] is not None:
+                        print(f"  平均个股情绪: {item['avg_ticker_sentiment_score']:+.3f}")
+                    display_articles(item["articles"], verbose=args.verbose)
+                    print()
         else:
-            print(f"找到 {len(articles)} 篇新闻:")
-            display_articles(articles, verbose=args.verbose)
+            articles = fetch_news(
+                tickers=args.tickers,
+                topics=args.topics,
+                time_from=time_from,
+                time_to=time_to,
+                sort=args.sort,
+                limit=min(args.limit, 50),
+            )
+            if args.output_file:
+                out_path = Path(args.output_file)
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_text(json.dumps(articles, indent=2, ensure_ascii=False), encoding="utf-8")
+                print(f"💾 已写入: {out_path}")
+
+            if args.json:
+                print(json.dumps(articles, indent=2, ensure_ascii=False))
+            else:
+                print(f"找到 {len(articles)} 篇新闻:")
+                display_articles(articles, verbose=args.verbose)
 
     except Exception as e:
         print(f"\n❌ 查询失败: {e}")

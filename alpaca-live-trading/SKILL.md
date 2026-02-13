@@ -8,10 +8,11 @@ AI 实时交易技能 - 使用 Alpaca Paper Trading 进行美股交易决策。
 
 交易决策与执行所需数据：
 1. **获取股价数据** - 通过 TradingView tvscreener 获取 NASDAQ 100 成分股的实时价格
-2. **获取市场新闻** - 通过 AlphaVantage NEWS_SENTIMENT API 获取市场新闻和情绪分析
-3. **获取市场情绪** - 通过 Polymarket 获取预测市场情绪指标
-4. **查询账户状态** - 通过 Alpaca API 获取当前持仓和账户余额
-5. **执行交易并落盘** - 每次交易后同步更新 `position.jsonl` 与 `balance.jsonl`
+2. **获取基本面数据** - 通过 AlphaVantage Fundamentals 获取近一年关键财务
+3. **获取市场新闻** - 通过 AlphaVantage NEWS_SENTIMENT API 获取新闻与情绪分析
+4. **获取市场情绪** - 通过 Polymarket 获取预测市场赔率指标
+5. **查询账户状态** - 通过 Alpaca API 获取当前持仓和账户余额
+6. **执行交易并落盘** - 每次交易后同步更新 `position.jsonl` 与 `balance.jsonl`
 
 ## 环境配置
 
@@ -51,6 +52,60 @@ alpaca:
 ## 查询脚本
 
 以下脚本均可独立运行，所有脚本位于 `skills/alpaca-live-trading/scripts/` 目录。
+
+## 标准一体化流程（推荐）
+
+默认流程（独立 Skill，不依赖 MCP）：
+
+1. 读取历史记录：`position.jsonl` + `balance.jsonl`
+2. 第一阶段（101 -> 10）：  
+   - 对默认股票池（NASDAQ 100 + QQQ，共 101 只）只拉取新闻与情绪（默认每只 5 条）  
+   - 按新闻动量分数排序，筛选 Top 10
+3. 第二阶段（深度分析）：  
+   - 对 Top 10 + `QQQ` + `SPY` 做深度分析  
+   - 包含：基本面、新闻情绪、Polymarket 赔率、tvscreener 价格与技术面
+4. 市场门控：使用 `QQQ/SPY` 与 Polymarket 信号判断是否允许执行交易
+5. 若门控通过则执行交易（可选），并更新 `position.jsonl` + `balance.jsonl`
+
+```bash
+# 仅跑分析（默认 101 只）
+python skills/alpaca-live-trading/scripts/run_analysis_trade_pipeline.py
+
+# 指定股票池并输出结果文件
+python skills/alpaca-live-trading/scripts/run_analysis_trade_pipeline.py \
+  --tickers NVDA,MSFT,AAPL \
+  --days 365 \
+  --news-limit 5 \
+  --prefilter-top-k 10 \
+  --benchmark-tickers QQQ,SPY \
+  --av-calls-per-minute 75 \
+  --output-file skills/alpaca-live-trading/data/analysis_pipeline_latest.json
+```
+
+常用参数说明：
+
+- `--prefilter-top-k`：第一阶段筛选数量（默认 10）
+- `--benchmark-tickers`：市场门控基准（默认 `QQQ,SPY`）
+- `--market-gate-threshold`：门控阈值，低于阈值则阻止交易执行（默认 `-0.05`）
+
+**执行交易（可选）**
+
+先准备交易计划文件（JSON 列表）：
+
+```json
+[
+  {"action": "buy", "symbol": "NVDA", "qty": 1},
+  {"action": "sell", "symbol": "AAPL", "qty": 1}
+]
+```
+
+然后执行：
+
+```bash
+python skills/alpaca-live-trading/scripts/run_analysis_trade_pipeline.py \
+  --trade-plan-file skills/alpaca-live-trading/data/trade_plan.json \
+  --execute-trades
+```
 
 ## 交易执行与记录规则（重要）
 
@@ -125,7 +180,46 @@ python skills/alpaca-live-trading/scripts/query_market_news.py --tickers AAPL --
 
 # 以 JSON 格式输出（方便程序解析）
 python skills/alpaca-live-trading/scripts/query_market_news.py --tickers NVDA --json
+
+# 分析前置：按股票逐个查询最近 5 条新闻+情绪（推荐）
+python skills/alpaca-live-trading/scripts/query_market_news.py --per-ticker --tickers NVDA,MSFT,AAPL --per-ticker-limit 5 --json
 ```
+
+**分析/交易前置要求（独立 Skill 场景）**
+
+- 在分析每个股票前，先调用 AlphaVantage NEWS_SENTIMENT。
+- 使用 `--per-ticker` 模式，确保每只股票单独拉取新闻（不要用 MCP search）。
+- 默认每只股票取最近 `5` 条（`--per-ticker-limit 5`）。
+- 可用 `--output-file` 将结果落盘给其他 agent 消费，例如：
+
+```bash
+python skills/alpaca-live-trading/scripts/query_market_news.py \
+  --per-ticker \
+  --tickers NVDA,MSFT,AAPL \
+  --per-ticker-limit 5 \
+  --days 7 \
+  --sort LATEST \
+  --output-file skills/alpaca-live-trading/data/market_news_per_ticker_latest.json \
+  --json
+```
+
+### 2.1 查询近一年关键财务数据 (AlphaVantage Fundamentals)
+
+```bash
+# 查询单只股票近一年关键财务（公司概览 + 季度财务）
+python skills/alpaca-live-trading/scripts/query_fundamentals.py --tickers NVDA
+
+# 查询多只股票并输出 JSON（供其他 agent 消费）
+python skills/alpaca-live-trading/scripts/query_fundamentals.py \
+  --tickers NVDA,MSFT,AAPL \
+  --days 365 \
+  --output-file skills/alpaca-live-trading/data/fundamentals_latest.json \
+  --json
+```
+
+**数据内容：**
+- `company_overview`：市值、PE、EPS(TTM)、利润率、ROE/ROA 等
+- `quarterly_key_financials`（近一年）：Revenue、NetIncome、FCF、EPS、Debt/Equity 等关键指标
 
 **支持的新闻主题：**
 `blockchain`, `earnings`, `ipo`, `mergers_and_acquisitions`, `financial_markets`, `economy_fiscal`, `economy_monetary`, `economy_macro`, `energy_transportation`, `finance`, `life_sciences`, `manufacturing`, `real_estate`, `retail_wholesale`, `technology`
@@ -271,8 +365,10 @@ skills/alpaca-live-trading/
 └── scripts/
     ├── _config.py                      # 共享配置加载模块
     ├── query_stock_prices.py           # 查询实时股价
+    ├── query_fundamentals.py           # 查询近一年关键财务数据
     ├── query_market_news.py            # 查询市场新闻和情绪
     ├── query_polymarket_sentiment.py   # 查询 Polymarket 预测市场情绪
+    ├── run_analysis_trade_pipeline.py  # 一体化流程：分析+可选交易
     ├── query_alpaca_account.py         # 查询 Alpaca 账户状态和持仓
     ├── execute_alpaca_trade.py         # 执行交易并更新 position/balance
     ├── query_trade_records.py          # 查询最近 N 条统一交易记录
@@ -291,7 +387,8 @@ skills/alpaca-live-trading/
    - 运行: `pip install pyyaml`
 
 3. **AlphaVantage API 调用限制**
-   - 免费版限制: 25 次/天, 5 次/分钟
+   - 本 Skill 默认按付费版节流：75 次/分钟（约 0.8 秒/次）
+   - 若账号配额不同，可通过脚本参数调整（如 `--av-calls-per-minute`）
    - 遇到限制时等待后重试
 
 4. **Alpaca API Key 无效**
