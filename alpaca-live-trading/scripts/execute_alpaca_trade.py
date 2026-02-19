@@ -20,14 +20,14 @@ import json
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from _config import get_alpaca_credentials, load_config
 
 try:
     from alpaca.trading.client import TradingClient
     from alpaca.trading.enums import OrderSide, TimeInForce
-    from alpaca.trading.requests import MarketOrderRequest
+    from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest
 except ImportError:
     print("❌ 缺少 alpaca-py，请安装: pip install alpaca-py")
     raise SystemExit(1)
@@ -51,6 +51,16 @@ DEFAULT_POSITION_SYMBOLS = [
     "CTSH", "CSGP", "KHC", "ODFL", "DXCM", "TTD", "ON", "BIIB", "LULU", "CDW", "GFS",
     "QQQ",
 ]
+
+TERMINAL_ORDER_STATUSES = {
+    "filled",
+    "partially_filled",
+    "canceled",
+    "expired",
+    "rejected",
+    "done_for_day",
+}
+
 
 def resolve_skill_data_dir() -> Path:
     # skills/alpaca-live-trading/scripts -> skills/alpaca-live-trading/data
@@ -140,57 +150,137 @@ def build_positions_details(positions) -> List[Dict[str, Any]]:
     return details
 
 
+def order_status_value(order: Any) -> str:
+    status = getattr(order, "status", "")
+    return status.value if hasattr(status, "value") else str(status)
+
+
+def to_float_or_none(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="执行 Alpaca 交易并更新 position/balance")
-    parser.add_argument("--action", required=True, choices=["buy", "sell"], help="交易动作")
-    parser.add_argument("--symbol", required=True, help="股票代码，如 AAPL")
-    parser.add_argument("--qty", required=True, type=int, help="交易股数，正整数")
+    parser = argparse.ArgumentParser(description="执行/管理 Alpaca 交易并更新 position/balance")
+    parser.add_argument("--action", choices=["buy", "sell"], help="交易动作")
+    parser.add_argument("--symbol", help="股票代码，如 AAPL")
+    parser.add_argument("--qty", type=int, help="交易股数，正整数")
+    parser.add_argument("--order-type", choices=["market", "limit"], default="market", help="订单类型")
+    parser.add_argument("--limit-price", type=float, help="限价单价格（order-type=limit 时必填）")
+    parser.add_argument("--wait-seconds", type=int, default=15, help="提交后轮询订单状态秒数，默认 15")
+    parser.add_argument("--cancel-order-id", help="取消指定订单")
+    parser.add_argument("--cancel-all-open", action="store_true", help="取消所有未完成订单")
     parser.add_argument("--json", action="store_true", help="输出 JSON")
     args = parser.parse_args()
 
-    if args.qty <= 0:
-        print("❌ qty 必须为正整数")
-        raise SystemExit(1)
-
     config = load_config()
     api_key, secret_key, paper = get_alpaca_credentials(config)
-
     client = TradingClient(api_key, secret_key, paper=paper)
+    # 订单管理操作
+    if args.cancel_order_id:
+        client.cancel_order_by_id(args.cancel_order_id)
+        result = {
+            "operation": "cancel_order",
+            "order_id": args.cancel_order_id,
+            "status": "requested",
+            "paper": bool(paper),
+        }
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            mode = "Paper Trading" if paper else "Live Trading"
+            print(f"✅ 已提交撤单请求 ({mode})")
+            print(f"  订单号: {args.cancel_order_id}")
+        raise SystemExit(0)
+
+    if args.cancel_all_open:
+        responses = client.cancel_orders()
+        out = []
+        for r in responses:
+            out.append(
+                {
+                    "id": str(getattr(r, "id", "")),
+                    "status_code": int(getattr(r, "status", 0))
+                    if getattr(r, "status", None) is not None
+                    else None,
+                }
+            )
+        result = {
+            "operation": "cancel_all_open",
+            "cancelled_count": len(out),
+            "responses": out,
+            "paper": bool(paper),
+        }
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            mode = "Paper Trading" if paper else "Live Trading"
+            print(f"✅ 已提交批量撤单 ({mode})")
+            print(f"  撤单数量: {len(out)}")
+        raise SystemExit(0)
+
+    # 交易提交参数校验
+    if not args.action:
+        print("❌ 缺少操作，请使用 --action 或撤单参数")
+        raise SystemExit(1)
+    if not args.symbol:
+        print("❌ --symbol 必填")
+        raise SystemExit(1)
+    if args.qty is None or args.qty <= 0:
+        print("❌ --qty 必须为正整数")
+        raise SystemExit(1)
+    if args.order_type == "limit" and (args.limit_price is None or args.limit_price <= 0):
+        print("❌ 限价单必须提供有效的 --limit-price")
+        raise SystemExit(1)
+    if args.order_type == "market" and args.limit_price is not None:
+        print("❌ 市价单不需要 --limit-price")
+        raise SystemExit(1)
+    if args.wait_seconds < 0:
+        print("❌ --wait-seconds 不能小于 0")
+        raise SystemExit(1)
+
     symbol = args.symbol.upper()
     side = OrderSide.BUY if args.action == "buy" else OrderSide.SELL
 
-    order = client.submit_order(
-        order_data=MarketOrderRequest(
+    if args.order_type == "market":
+        order_request = MarketOrderRequest(
             symbol=symbol,
             qty=args.qty,
             side=side,
             time_in_force=TimeInForce.DAY,
         )
-    )
+    else:
+        order_request = LimitOrderRequest(
+            symbol=symbol,
+            qty=args.qty,
+            side=side,
+            time_in_force=TimeInForce.DAY,
+            limit_price=args.limit_price,
+        )
 
-    filled_price = None
-    for _ in range(15):
+    order = client.submit_order(order_data=order_request)
+    current_status = order_status_value(order)
+    for _ in range(args.wait_seconds):
         time.sleep(1)
         order = client.get_order_by_id(order.id)
-        status = order.status.value if hasattr(order.status, "value") else str(order.status)
-        if status in {"filled", "partially_filled"}:
-            filled_price = float(order.filled_avg_price) if order.filled_avg_price else None
+        current_status = order_status_value(order)
+        if current_status in TERMINAL_ORDER_STATUSES:
             break
-        if status in {"canceled", "expired", "rejected"}:
-            print(f"❌ 订单失败: {status}")
-            raise SystemExit(1)
 
-    if not filled_price:
-        print("⏳ 订单已提交但尚未成交，请稍后查询账户状态。")
-        raise SystemExit(0)
-
-    # 每笔交易后重新查询 Alpaca 实际账户和持仓（作为唯一真实来源）
+    # 每笔交易后都记录快照；即便未成交也保留审计轨迹
     account = client.get_account()
     positions = client.get_all_positions()
     normalized_positions = build_positions_from_alpaca(account, positions)
     positions_details = build_positions_details(positions)
 
     ts = get_dual_timestamps(order)
+    filled_price = to_float_or_none(getattr(order, "filled_avg_price", None))
+    limit_price = to_float_or_none(getattr(order, "limit_price", None))
+
     base_dir = resolve_skill_data_dir()
     position_file = base_dir / "position" / "position.jsonl"
     balance_file = base_dir / "balance" / "balance.jsonl"
@@ -208,6 +298,9 @@ def main() -> None:
                 "symbol": symbol,
                 "amount": args.qty,
                 "price": filled_price,
+                "order_type": args.order_type,
+                "limit_price": limit_price,
+                "order_status": current_status,
                 "source": "alpaca-skill",
                 "order_id": str(order.id),
             },
@@ -225,6 +318,9 @@ def main() -> None:
                 "action": args.action,
                 "symbol": symbol,
                 "qty": args.qty,
+                "order_type": args.order_type,
+                "limit_price": limit_price,
+                "order_status": current_status,
                 "filled_price": filled_price,
                 "order_id": str(order.id),
                 "filled_at_et": ts["timestamp_et"],
@@ -250,10 +346,13 @@ def main() -> None:
     )
 
     result = {
-        "status": "filled",
+        "operation": "submit_order",
+        "status": current_status,
         "action": args.action,
         "symbol": symbol,
         "qty": args.qty,
+        "order_type": args.order_type,
+        "limit_price": limit_price,
         "filled_price": filled_price,
         "order_id": str(order.id),
         "paper": bool(paper),
@@ -265,12 +364,20 @@ def main() -> None:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
         mode = "Paper Trading" if paper else "Live Trading"
-        print(f"✅ 交易成功 ({mode})")
+        icon = "✅" if current_status in {"filled", "partially_filled"} else "⏳"
+        print(f"{icon} 订单已提交 ({mode})")
         print(f"  动作: {args.action.upper()} {symbol} x {args.qty}")
-        print(f"  成交价: ${filled_price:.2f}")
+        print(f"  类型: {args.order_type.upper()}")
+        if limit_price is not None:
+            print(f"  限价: ${limit_price:.2f}")
+        print(f"  状态: {current_status}")
+        print(f"  成交均价: ${filled_price:.2f}" if filled_price is not None else "  成交均价: N/A")
         print(f"  订单号: {order.id}")
         print(f"  position: {position_file}")
         print(f"  balance: {balance_file}")
+
+    if current_status in {"canceled", "expired", "rejected"}:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
