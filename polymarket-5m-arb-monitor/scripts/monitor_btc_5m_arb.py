@@ -28,7 +28,7 @@ try:
     from alpaca.trading.enums import OrderSide, TimeInForce
     from alpaca.trading.requests import MarketOrderRequest
     from alpaca.data.historical.crypto import CryptoHistoricalDataClient
-    from alpaca.data.requests import CryptoBarsRequest
+    from alpaca.data.requests import CryptoBarsRequest, CryptoLatestQuoteRequest, CryptoLatestTradeRequest
     from alpaca.data.timeframe import TimeFrame
 except ImportError:
     print("❌ 缺少 alpaca-py，请安装: pip install alpaca-py")
@@ -70,6 +70,36 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.0015,
         help="手续费门槛（小数），默认 0.0015 即 0.15%%",
+    )
+    parser.add_argument(
+        "--strategy-mode",
+        choices=["bucket_follow", "model_edge"],
+        default="bucket_follow",
+        help="执行策略：bucket_follow(回测桶策略) 或 model_edge(KNN边际策略)",
+    )
+    parser.add_argument(
+        "--confidence-min",
+        type=float,
+        default=0.01,
+        help="bucket_follow: 置信度下限 |p_up-p_down|，默认 0.01",
+    )
+    parser.add_argument(
+        "--confidence-max",
+        type=float,
+        default=0.02,
+        help="bucket_follow: 置信度上限 |p_up-p_down|，默认 0.02",
+    )
+    parser.add_argument(
+        "--max-prob-min",
+        type=float,
+        default=0.505,
+        help="bucket_follow: max(p_up,p_down) 下限，默认 0.505",
+    )
+    parser.add_argument(
+        "--max-prob-max",
+        type=float,
+        default=0.510,
+        help="bucket_follow: max(p_up,p_down) 上限，默认 0.510",
     )
     parser.add_argument(
         "--history-bars",
@@ -251,6 +281,34 @@ def fetch_alpaca_closes(
     if len(closes) < 30:
         raise RuntimeError(f"分钟线数量不足: {len(closes)}")
     return closes
+
+
+def fetch_alpaca_spot_price(client: CryptoHistoricalDataClient, symbol: str) -> float:
+    try:
+        quote = client.get_crypto_latest_quote(
+            CryptoLatestQuoteRequest(symbol_or_symbols=[symbol])
+        ).get(symbol)
+        if quote is not None:
+            bid = float(getattr(quote, "bid_price", 0) or 0)
+            ask = float(getattr(quote, "ask_price", 0) or 0)
+            if bid > 0 and ask > 0:
+                return (bid + ask) / 2.0
+    except Exception:
+        pass
+
+    try:
+        trade = client.get_crypto_latest_trade(
+            CryptoLatestTradeRequest(symbol_or_symbols=[symbol])
+        ).get(symbol)
+        if trade is not None:
+            px = float(getattr(trade, "price", 0) or 0)
+            if px > 0:
+                return px
+    except Exception:
+        pass
+
+    closes = fetch_alpaca_closes(client, symbol, 30)
+    return float(closes[-1])
 
 
 def estimate_up_probability_knn(
@@ -521,6 +579,53 @@ def build_opportunity(
     }
 
 
+def build_bucket_follow_opportunity(
+    market: Dict[str, Any],
+    up_prob_pm: float,
+    down_prob_pm: float,
+    spot_price: float,
+    fee_rate: float,
+    alpaca_symbol: str,
+    confidence_min: float,
+    confidence_max: float,
+    max_prob_min: float,
+    max_prob_max: float,
+) -> Dict[str, Any]:
+    confidence = abs(up_prob_pm - down_prob_pm)
+    max_prob = max(up_prob_pm, down_prob_pm)
+    best_side = "UP" if up_prob_pm >= down_prob_pm else "DOWN"
+    bucket_hit = (
+        confidence_min <= confidence < confidence_max
+        and max_prob_min <= max_prob < max_prob_max
+    )
+    signal = "ARBITRAGE" if bucket_hit else "NO_EDGE"
+
+    return {
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "signal": signal,
+        "best_side": best_side,
+        "best_edge": confidence,  # bucket策略中将 confidence 作为可读边际指标
+        "fee_rate": fee_rate,
+        "pm_market_question": market.get("question") or market.get("title"),
+        "pm_market_slug": market.get("slug"),
+        "pm_event_slug": market.get("event_slug"),
+        "pm_up_prob": up_prob_pm,
+        "pm_down_prob": down_prob_pm,
+        "alpaca_symbol": alpaca_symbol,
+        "alpaca_spot_price": spot_price,
+        "strategy_mode": "bucket_follow",
+        "bucket_hit": bucket_hit,
+        "bucket_metrics": {
+            "confidence": confidence,
+            "max_prob": max_prob,
+            "confidence_min": confidence_min,
+            "confidence_max": confidence_max,
+            "max_prob_min": max_prob_min,
+            "max_prob_max": max_prob_max,
+        },
+    }
+
+
 def print_human(result: Dict[str, Any]) -> None:
     edge_pct = result["best_edge"] * 100.0
     fee_pct = result["fee_rate"] * 100.0
@@ -529,8 +634,18 @@ def print_human(result: Dict[str, Any]) -> None:
         f"{mark} {result['timestamp_utc']} | {result['signal']} | "
         f"best={result['best_side']} edge={edge_pct:.3f}% (fee={fee_pct:.3f}%) | "
         f"PM Up={result['pm_up_prob']*100:.2f}% Down={result['pm_down_prob']*100:.2f}% | "
-        f"Model Up={result['model_up_prob']*100:.2f}% | Spot={result['alpaca_spot_price']:.2f}"
+        f"Spot={result['alpaca_spot_price']:.2f}"
     )
+    if "model_up_prob" in result:
+        print(f"    model_up_prob={result['model_up_prob']*100:.2f}%")
+    if result.get("strategy_mode") == "bucket_follow":
+        bm = result.get("bucket_metrics", {})
+        print(
+            "    bucket_follow: "
+            f"hit={result.get('bucket_hit')} "
+            f"confidence={float(bm.get('confidence', 0))*100:.3f}% "
+            f"max_prob={float(bm.get('max_prob', 0))*100:.3f}%"
+        )
     auto_trade = result.get("auto_trade")
     if isinstance(auto_trade, dict) and auto_trade.get("enabled"):
         print(
@@ -566,6 +681,12 @@ def main() -> None:
     if args.trade_cooldown_seconds < 0:
         print("❌ --trade-cooldown-seconds 不能小于 0")
         raise SystemExit(1)
+    if not (0 <= args.confidence_min < args.confidence_max <= 1):
+        print("❌ confidence 桶区间非法")
+        raise SystemExit(1)
+    if not (0 <= args.max_prob_min < args.max_prob_max <= 1):
+        print("❌ max_prob 桶区间非法")
+        raise SystemExit(1)
 
     existing_pid = read_pid(args.pid_file)
     if existing_pid is not None and process_exists(existing_pid):
@@ -591,19 +712,34 @@ def main() -> None:
             try:
                 market = fetch_polymarket_target_market(session)
                 up_pm, down_pm = extract_up_down_prob(market)
-                closes = fetch_alpaca_closes(alpaca_client, args.symbol, args.history_bars)
-                spot = float(closes[-1])
-                up_model, meta = estimate_up_probability_knn(closes, args.neighbors)
-                result = build_opportunity(
-                    market=market,
-                    up_prob_pm=up_pm,
-                    down_prob_pm=down_pm,
-                    up_prob_model=up_model,
-                    spot_price=spot,
-                    fee_rate=args.fee_rate,
-                    model_meta=meta,
-                    alpaca_symbol=args.symbol,
-                )
+                spot = fetch_alpaca_spot_price(alpaca_client, args.symbol)
+                if args.strategy_mode == "model_edge":
+                    closes = fetch_alpaca_closes(alpaca_client, args.symbol, args.history_bars)
+                    up_model, meta = estimate_up_probability_knn(closes, args.neighbors)
+                    result = build_opportunity(
+                        market=market,
+                        up_prob_pm=up_pm,
+                        down_prob_pm=down_pm,
+                        up_prob_model=up_model,
+                        spot_price=spot,
+                        fee_rate=args.fee_rate,
+                        model_meta=meta,
+                        alpaca_symbol=args.symbol,
+                    )
+                    result["strategy_mode"] = "model_edge"
+                else:
+                    result = build_bucket_follow_opportunity(
+                        market=market,
+                        up_prob_pm=up_pm,
+                        down_prob_pm=down_pm,
+                        spot_price=spot,
+                        fee_rate=args.fee_rate,
+                        alpaca_symbol=args.symbol,
+                        confidence_min=args.confidence_min,
+                        confidence_max=args.confidence_max,
+                        max_prob_min=args.max_prob_min,
+                        max_prob_max=args.max_prob_max,
+                    )
                 result["paper"] = paper
 
                 if args.auto_trade:
