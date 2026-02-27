@@ -17,7 +17,7 @@ pip install requests pyyaml alpaca-py
 
 ## 配置
 
-默认读取 `polymarket-5m-arb-monitor/config.yaml`：
+默认读取 `./config.yaml`：
 
 ```yaml
 alpaca:
@@ -32,29 +32,29 @@ alpaca:
 
 ```bash
 # 单次测试（轮询1次）
-python polymarket-5m-arb-monitor/scripts/monitor_btc_5m_arb.py --polls 1
+python ./scripts/monitor_btc_5m_arb.py --polls 1
 
 # 持续监控（每30秒）
-python polymarket-5m-arb-monitor/scripts/monitor_btc_5m_arb.py
+python ./scripts/monitor_btc_5m_arb.py
 
 # JSON 输出，便于程序消费
-python polymarket-5m-arb-monitor/scripts/monitor_btc_5m_arb.py --json
+python ./scripts/monitor_btc_5m_arb.py --json
 
 # 停止正在运行的监控进程
-python polymarket-5m-arb-monitor/scripts/monitor_btc_5m_arb.py --stop
+python ./scripts/monitor_btc_5m_arb.py --stop
 
 # 发现套利机会后自动交易（单笔 $100，冷却300秒）
-python polymarket-5m-arb-monitor/scripts/monitor_btc_5m_arb.py \
+python ./scripts/monitor_btc_5m_arb.py \
   --auto-trade \
   --trade-notional-usd 100 \
   --trade-cooldown-seconds 300
 
 # 仅采集回测数据（不交易）
-python polymarket-5m-arb-monitor/scripts/collect_btc_5m_backtest_data.py \
+python ./scripts/collect_btc_5m_backtest_data.py \
   --interval-seconds 30 --json
 
 # 严格回测（按 Polymarket 已结算结果）
-python polymarket-5m-arb-monitor/scripts/run_strict_backtest.py --json
+python ./scripts/run_strict_backtest.py --json
 ```
 
 ## 关键参数

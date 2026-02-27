@@ -27,7 +27,7 @@ pip install requests pyyaml alpaca-py tvscreener
 复制配置模板并填入真实的 API Key：
 
 ```bash
-cp skills/alpaca-live-trading/config.example.yaml skills/alpaca-live-trading/config.yaml
+cp ./config.example.yaml ./config.yaml
 ```
 
 编辑 `config.yaml`：
@@ -51,7 +51,7 @@ alpaca:
 
 ## 查询脚本
 
-以下脚本均可独立运行，所有脚本位于 `skills/alpaca-live-trading/scripts/` 目录。
+以下脚本均可独立运行，所有脚本位于 `./scripts/` 目录。
 
 ## 标准一体化流程（推荐）
 
@@ -69,17 +69,17 @@ alpaca:
 
 ```bash
 # 仅跑分析（默认 101 只）
-python skills/alpaca-live-trading/scripts/run_analysis_trade_pipeline.py
+python ./scripts/run_analysis_trade_pipeline.py
 
 # 指定股票池并输出结果文件
-python skills/alpaca-live-trading/scripts/run_analysis_trade_pipeline.py \
+python ./scripts/run_analysis_trade_pipeline.py \
   --tickers NVDA,MSFT,AAPL \
   --days 365 \
   --news-limit 5 \
   --prefilter-top-k 10 \
   --benchmark-tickers QQQ,SPY \
   --av-calls-per-minute 75 \
-  --output-file skills/alpaca-live-trading/data/analysis_pipeline_latest.json
+  --output-file ./data/analysis_pipeline_latest.json
 ```
 
 常用参数说明：
@@ -102,8 +102,8 @@ python skills/alpaca-live-trading/scripts/run_analysis_trade_pipeline.py \
 然后执行：
 
 ```bash
-python skills/alpaca-live-trading/scripts/run_analysis_trade_pipeline.py \
-  --trade-plan-file skills/alpaca-live-trading/data/trade_plan.json \
+python ./scripts/run_analysis_trade_pipeline.py \
+  --trade-plan-file ./data/trade_plan.json \
   --execute-trades
 ```
 
@@ -124,10 +124,10 @@ python skills/alpaca-live-trading/scripts/run_analysis_trade_pipeline.py \
 
 ```bash
 # 查询 NASDAQ 100 + QQQ (共 101 只) 的实时价格
-python skills/alpaca-live-trading/scripts/query_stock_prices.py
+python ./scripts/query_stock_prices.py
 
 # 查询指定股票
-python skills/alpaca-live-trading/scripts/query_stock_prices.py AAPL MSFT NVDA
+python ./scripts/query_stock_prices.py AAPL MSFT NVDA
 ```
 
 **默认股票列表（NASDAQ 100 + QQQ，101 只）：**
@@ -148,7 +148,7 @@ QQQ
 > 注意：该脚本使用 TradingView tvscreener，无需 AlphaVantage 限速配置。
 
 **查询结果会更新到：**
-`skills/alpaca-live-trading/data/stock_prices_latest.json`
+`./data/stock_prices_latest.json`
 
 **输出示例：**
 ```
@@ -167,22 +167,22 @@ MSFT     $420.30      +1.80      +0.43%
 
 ```bash
 # 查询最新金融市场新闻
-python skills/alpaca-live-trading/scripts/query_market_news.py
+python ./scripts/query_market_news.py
 
 # 查询指定股票相关新闻
-python skills/alpaca-live-trading/scripts/query_market_news.py --tickers AAPL,NVDA
+python ./scripts/query_market_news.py --tickers AAPL,NVDA
 
 # 查询指定主题新闻
-python skills/alpaca-live-trading/scripts/query_market_news.py --topics technology
+python ./scripts/query_market_news.py --topics technology
 
 # 组合过滤 + 详细模式
-python skills/alpaca-live-trading/scripts/query_market_news.py --tickers AAPL --topics earnings --verbose
+python ./scripts/query_market_news.py --tickers AAPL --topics earnings --verbose
 
 # 以 JSON 格式输出（方便程序解析）
-python skills/alpaca-live-trading/scripts/query_market_news.py --tickers NVDA --json
+python ./scripts/query_market_news.py --tickers NVDA --json
 
 # 分析前置：按股票逐个查询最近 5 条新闻+情绪（推荐）
-python skills/alpaca-live-trading/scripts/query_market_news.py --per-ticker --tickers NVDA,MSFT,AAPL --per-ticker-limit 5 --json
+python ./scripts/query_market_news.py --per-ticker --tickers NVDA,MSFT,AAPL --per-ticker-limit 5 --json
 ```
 
 **分析/交易前置要求（独立 Skill 场景）**
@@ -193,13 +193,13 @@ python skills/alpaca-live-trading/scripts/query_market_news.py --per-ticker --ti
 - 可用 `--output-file` 将结果落盘给其他 agent 消费，例如：
 
 ```bash
-python skills/alpaca-live-trading/scripts/query_market_news.py \
+python ./scripts/query_market_news.py \
   --per-ticker \
   --tickers NVDA,MSFT,AAPL \
   --per-ticker-limit 5 \
   --days 7 \
   --sort LATEST \
-  --output-file skills/alpaca-live-trading/data/market_news_per_ticker_latest.json \
+  --output-file ./data/market_news_per_ticker_latest.json \
   --json
 ```
 
@@ -207,13 +207,13 @@ python skills/alpaca-live-trading/scripts/query_market_news.py \
 
 ```bash
 # 查询单只股票近一年关键财务（公司概览 + 季度财务）
-python skills/alpaca-live-trading/scripts/query_fundamentals.py --tickers NVDA
+python ./scripts/query_fundamentals.py --tickers NVDA
 
 # 查询多只股票并输出 JSON（供其他 agent 消费）
-python skills/alpaca-live-trading/scripts/query_fundamentals.py \
+python ./scripts/query_fundamentals.py \
   --tickers NVDA,MSFT,AAPL \
   --days 365 \
-  --output-file skills/alpaca-live-trading/data/fundamentals_latest.json \
+  --output-file ./data/fundamentals_latest.json \
   --json
 ```
 
@@ -245,10 +245,10 @@ python skills/alpaca-live-trading/scripts/query_fundamentals.py \
 
 ```bash
 # 查询金融市场情绪指标
-python skills/alpaca-live-trading/scripts/query_polymarket_sentiment.py
+python ./scripts/query_polymarket_sentiment.py
 
 # 查询热门预测市场
-python skills/alpaca-live-trading/scripts/query_polymarket_sentiment.py --trending
+python ./scripts/query_polymarket_sentiment.py --trending
 ```
 
 **输出示例：**
@@ -269,13 +269,13 @@ python skills/alpaca-live-trading/scripts/query_polymarket_sentiment.py --trendi
 
 ```bash
 # 查询账户余额和持仓
-python skills/alpaca-live-trading/scripts/query_alpaca_account.py
+python ./scripts/query_alpaca_account.py
 
 # 同时显示最近订单
-python skills/alpaca-live-trading/scripts/query_alpaca_account.py --orders
+python ./scripts/query_alpaca_account.py --orders
 
 # 以 JSON 格式输出
-python skills/alpaca-live-trading/scripts/query_alpaca_account.py --json
+python ./scripts/query_alpaca_account.py --json
 ```
 
 **输出示例：**
@@ -302,18 +302,18 @@ python skills/alpaca-live-trading/scripts/query_alpaca_account.py --json
 
 ```bash
 # 买入
-python skills/alpaca-live-trading/scripts/execute_alpaca_trade.py --action buy --symbol AAPL --qty 1
+python ./scripts/execute_alpaca_trade.py --action buy --symbol AAPL --qty 1
 
 # 卖出
-python skills/alpaca-live-trading/scripts/execute_alpaca_trade.py --action sell --symbol AAPL --qty 1
+python ./scripts/execute_alpaca_trade.py --action sell --symbol AAPL --qty 1
 
 # 输出 JSON
-python skills/alpaca-live-trading/scripts/execute_alpaca_trade.py --action buy --symbol NVDA --qty 2 --json
+python ./scripts/execute_alpaca_trade.py --action buy --symbol NVDA --qty 2 --json
 ```
 
 **交易后更新文件（skill 内部目录）：**
-- `skills/alpaca-live-trading/data/position/position.jsonl`
-- `skills/alpaca-live-trading/data/balance/balance.jsonl`
+- `./data/position/position.jsonl`
+- `./data/balance/balance.jsonl`
 
 `balance.jsonl` 每条记录包含：
 - `account`：账户总览（cash, buying_power, equity, portfolio_value 等）
@@ -325,13 +325,13 @@ python skills/alpaca-live-trading/scripts/execute_alpaca_trade.py --action buy -
 
 ```bash
 # 默认最近 50 条
-python skills/alpaca-live-trading/scripts/query_trade_records.py
+python ./scripts/query_trade_records.py
 
 # 查询最近 20 条
-python skills/alpaca-live-trading/scripts/query_trade_records.py --limit 20
+python ./scripts/query_trade_records.py --limit 20
 
 # 输出 JSON
-python skills/alpaca-live-trading/scripts/query_trade_records.py --json
+python ./scripts/query_trade_records.py --json
 ```
 
 该脚本会读取并统一展示：
@@ -343,22 +343,22 @@ python skills/alpaca-live-trading/scripts/query_trade_records.py --json
 
 ```bash
 # 重置单 agent 记录文件（会二次确认）
-python skills/alpaca-live-trading/scripts/reset_account_state.py
+python ./scripts/reset_account_state.py
 
 # 跳过确认直接执行
-python skills/alpaca-live-trading/scripts/reset_account_state.py --yes
+python ./scripts/reset_account_state.py --yes
 ```
 
 该指令会删除：
-- `skills/alpaca-live-trading/data/position/position.jsonl`
-- `skills/alpaca-live-trading/data/balance/balance.jsonl`
+- `./data/position/position.jsonl`
+- `./data/balance/balance.jsonl`
 
 > 注意：只会清理本地记录文件，不会修改 Alpaca 真实账户持仓与余额。下次交易会自动重新创建这两个文件。
 
 ## 文件结构
 
 ```
-skills/alpaca-live-trading/
+./
 ├── SKILL.md                 # 本文档
 ├── config.yaml              # API Keys 配置（不提交到 Git）
 ├── config.example.yaml      # 配置模板

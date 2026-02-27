@@ -13,19 +13,19 @@ Query [Polymarket](https://polymarket.com) prediction markets. Check odds, find 
 
 ```bash
 # Trending/active markets
-python3 {baseDir}/scripts/polymarket.py trending
+python3 ./scripts/polymarket.py trending
 
 # Search markets
-python3 {baseDir}/scripts/polymarket.py search "trump"
-python3 {baseDir}/scripts/polymarket.py search "bitcoin"
+python3 ./scripts/polymarket.py search "trump"
+python3 ./scripts/polymarket.py search "bitcoin"
 
 # Get specific market by slug
-python3 {baseDir}/scripts/polymarket.py event "fed-decision-in-october"
+python3 ./scripts/polymarket.py event "fed-decision-in-october"
 
 # Get markets by category
-python3 {baseDir}/scripts/polymarket.py category politics
-python3 {baseDir}/scripts/polymarket.py category crypto
-python3 {baseDir}/scripts/polymarket.py category sports
+python3 ./scripts/polymarket.py category politics
+python3 ./scripts/polymarket.py category crypto
+python3 ./scripts/polymarket.py category sports
 ```
 
 ## Example Chat Usage

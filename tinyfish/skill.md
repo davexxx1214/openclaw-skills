@@ -8,8 +8,8 @@ TinyFish Web Agent 独立技能（Python 版）。
 - 同步调用接口：`/run`
 - 流式调用接口：`/run-sse`
 - 支持防检测参数：`browser_profile=stealth` + `proxy_config`
-- 所有脚本独立放在 `skills/tinyfish/scripts/`
-- API Key 从 `skills/tinyfish/.env` 读取（你已配置完成）
+- 所有脚本独立放在 `./scripts/`
+- API Key 从 `./.env` 读取（你已配置完成）
 
 ## 依赖安装
 
@@ -21,7 +21,7 @@ pip install requests python-dotenv
 
 ## 环境变量
 
-`skills/tinyfish/.env` 中应包含：
+`./.env` 中应包含：
 
 ```bash
 TINYFISH_API_KEY=sk-tinyfish-*****
@@ -32,7 +32,7 @@ TINYFISH_API_KEY=sk-tinyfish-*****
 ### 1) 联通测试（推荐先执行）
 
 ```bash
-python skills/tinyfish/scripts/test_connection.py
+python ./scripts/test_connection.py
 ```
 
 用途：
@@ -43,31 +43,31 @@ python skills/tinyfish/scripts/test_connection.py
 ### 2) 同步模式调用
 
 ```bash
-python skills/tinyfish/scripts/run_sync.py --url "https://example.com" --goal "Extract page title as JSON."
+python ./scripts/run_sync.py --url "https://example.com" --goal "Extract page title as JSON."
 ```
 
 启用防检测：
 
 ```bash
-python skills/tinyfish/scripts/run_sync.py --url "https://example.com" --goal "Extract page title as JSON." --stealth
+python ./scripts/run_sync.py --url "https://example.com" --goal "Extract page title as JSON." --stealth
 ```
 
 ### 3) 流式模式调用（实时进度）
 
 ```bash
-python skills/tinyfish/scripts/run_sse.py --url "https://example.com" --goal "Extract page title as JSON."
+python ./scripts/run_sse.py --url "https://example.com" --goal "Extract page title as JSON."
 ```
 
 启用防检测：
 
 ```bash
-python skills/tinyfish/scripts/run_sse.py --url "https://example.com" --goal "Extract page title as JSON." --stealth
+python ./scripts/run_sse.py --url "https://example.com" --goal "Extract page title as JSON." --stealth
 ```
 
 ## 脚本结构
 
 ```text
-skills/tinyfish/
+./
 ├── .env
 ├── skill.md
 └── scripts/
@@ -98,7 +98,7 @@ skills/tinyfish/
 ## 故障排查
 
 1. 报错 `TINYFISH_API_KEY is missing`
-   - 检查 `skills/tinyfish/.env` 文件是否存在且变量名正确
+   - 检查 `./.env` 文件是否存在且变量名正确
 2. HTTP 401/403
    - 检查 API Key 是否有效、是否过期
 3. 请求超时

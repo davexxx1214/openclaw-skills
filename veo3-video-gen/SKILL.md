@@ -10,7 +10,7 @@ Use the bundled script to generate an MP4 from a text prompt.
 ## Generate (text → video)
 
 ```bash
-uv run {baseDir}/scripts/generate_video.py \
+uv run ./scripts/generate_video.py \
   --prompt "A close up of ..." \
   --filename "out.mp4" \
   --model "veo-3.1-generate-preview" \
@@ -25,7 +25,7 @@ Veo commonly outputs ~8s clips per request. Use `--segments` to generate multipl
 **Important:** This skill sends **one prompt per segment** (one Veo request per segment). Use `--base-style` to keep style consistent across segments.
 
 ```bash
-uv run {baseDir}/scripts/generate_video.py \
+uv run ./scripts/generate_video.py \
   --prompt "Same scene, consistent style..." \
   --filename "out-24s.mp4" \
   --model "veo-3.1-generate-preview" \
