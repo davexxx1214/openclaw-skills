@@ -13,7 +13,7 @@ from __future__ import annotations
 import sys
 import json
 import argparse
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Dict, List, Any
 
@@ -31,6 +31,114 @@ try:
 except ImportError:
     ALPACA_AVAILABLE = False
     print("⚠️ alpaca-py 未安装，请运行: pip install alpaca-py")
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    ZoneInfo = None
+
+
+def resolve_skill_data_dir() -> Path:
+    # skills/alpaca-live-trading/scripts -> skills/alpaca-live-trading/data
+    return Path(__file__).resolve().parent.parent / "data"
+
+
+def get_now_timestamps() -> Dict[str, str]:
+    now_utc = datetime.now(timezone.utc)
+    if ZoneInfo is not None:
+        now_et = now_utc.astimezone(ZoneInfo("US/Eastern"))
+    else:
+        now_et = now_utc
+    return {
+        "date": now_et.strftime("%Y-%m-%d %H:%M:%S"),
+        "timestamp_et": now_et.isoformat(timespec="seconds"),
+        "timestamp_utc": now_utc.isoformat(timespec="seconds"),
+    }
+
+
+def append_jsonl(path: Path, row: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def build_position_snapshot(positions: List[Dict[str, Any]], cash: float) -> Dict[str, Any]:
+    snapshot: Dict[str, Any] = {"CASH": float(cash)}
+    for pos in positions:
+        symbol = str(pos.get("symbol", "")).upper()
+        if not symbol:
+            continue
+        try:
+            qty = float(pos.get("qty", 0))
+        except Exception:
+            qty = 0.0
+        if abs(qty) > 0:
+            snapshot[symbol] = qty
+    return snapshot
+
+
+def ensure_local_record_files(account: Dict[str, Any], positions: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    查询账户时自动初始化本地记录文件：
+    - data/position/position.jsonl
+    - data/balance/balance.jsonl
+    """
+    base_dir = resolve_skill_data_dir()
+    position_file = base_dir / "position" / "position.jsonl"
+    balance_file = base_dir / "balance" / "balance.jsonl"
+    created: List[str] = []
+    ts = get_now_timestamps()
+
+    if not position_file.exists():
+        append_jsonl(
+            position_file,
+            {
+                "date": ts["date"],
+                "timestamp_et": ts["timestamp_et"],
+                "timestamp_utc": ts["timestamp_utc"],
+                "id": 1,
+                "this_action": {
+                    "action": "init_snapshot",
+                    "symbol": "N/A",
+                    "amount": 0,
+                    "price": None,
+                    "order_type": "snapshot",
+                    "order_status": "snapshot",
+                    "source": "query_alpaca_account",
+                    "order_id": "",
+                },
+                "positions": build_position_snapshot(positions, account.get("cash", 0.0)),
+            },
+        )
+        created.append(str(position_file))
+
+    if not balance_file.exists():
+        append_jsonl(
+            balance_file,
+            {
+                "date": ts["date"],
+                "timestamp_et": ts["timestamp_et"],
+                "timestamp_utc": ts["timestamp_utc"],
+                "trade": {
+                    "action": "init_snapshot",
+                    "symbol": "N/A",
+                    "qty": 0,
+                    "order_type": "snapshot",
+                    "order_status": "snapshot",
+                    "filled_price": None,
+                    "order_id": "",
+                },
+                "account": account,
+                "positions": positions,
+            },
+        )
+        created.append(str(balance_file))
+
+    return {
+        "position_file": str(position_file),
+        "balance_file": str(balance_file),
+        "created_files": created,
+    }
 
 
 def get_alpaca_client() -> Optional[TradingClient]:
@@ -184,9 +292,13 @@ def main():
     try:
         # 获取账户信息
         account = get_account_info(client)
+        # 获取持仓（用于输出 + 初始化本地文件）
+        positions = get_positions(client)
+        init_result = ensure_local_record_files(account, positions)
 
         if args.json:
             output = {"account": account}
+            output["records"] = init_result
         else:
             print("📊 账户概览")
             print("-" * 40)
@@ -203,9 +315,6 @@ def main():
             daily_change_pct = (daily_change / account['last_equity'] * 100) if account['last_equity'] > 0 else 0
             print(f"  日收益: {format_currency(daily_change)} ({format_percent(daily_change_pct)})")
             print()
-
-        # 获取持仓
-        positions = get_positions(client)
 
         if args.json:
             output["positions"] = positions
@@ -251,6 +360,10 @@ def main():
 
         if args.json:
             print(json.dumps(output, indent=2, ensure_ascii=False))
+        elif init_result["created_files"]:
+            print("🧩 已自动初始化本地记录文件:")
+            for p in init_result["created_files"]:
+                print(f"  - {p}")
 
     except Exception as e:
         print(f"\n❌ 查询失败: {e}")

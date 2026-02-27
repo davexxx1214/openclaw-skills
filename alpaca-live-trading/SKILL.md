@@ -24,11 +24,7 @@ pip install requests pyyaml alpaca-py tvscreener
 
 ### 2. 配置 API Keys
 
-复制配置模板并填入真实的 API Key：
-
-```bash
-cp ./config.example.yaml ./config.yaml
-```
+默认直接读取 `./config.yaml`（已预先配置好 API Key）：
 
 编辑 `config.yaml`：
 
