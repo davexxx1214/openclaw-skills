@@ -25,6 +25,7 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _config import get_alphavantage_key, load_config  # noqa: E402
+from query_stock_prices import DEFAULT_SYMBOLS  # noqa: E402
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -89,6 +90,53 @@ def ensure_db(db_path: Path) -> sqlite3.Connection:
     )
     conn.commit()
     return conn
+
+
+def ensure_sync_audit_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sync_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_name TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            started_at_utc TEXT NOT NULL,
+            finished_at_utc TEXT NOT NULL,
+            status TEXT NOT NULL,
+            inserted_rows INTEGER NOT NULL DEFAULT 0,
+            fetch_mode TEXT,
+            error_message TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_sync_audit_job_symbol
+        ON sync_audit(job_name, symbol)
+        """
+    )
+    conn.commit()
+
+
+def insert_sync_audit(
+    conn: sqlite3.Connection,
+    job_name: str,
+    symbol: str,
+    started_at_utc: str,
+    finished_at_utc: str,
+    status: str,
+    inserted_rows: int,
+    fetch_mode: Optional[str] = None,
+    error_message: Optional[str] = None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO sync_audit (
+            job_name, symbol, started_at_utc, finished_at_utc, status, inserted_rows, fetch_mode, error_message
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (job_name, symbol, started_at_utc, finished_at_utc, status, inserted_rows, fetch_mode, error_message),
+    )
+    conn.commit()
 
 
 def get_latest_db_trade_date(conn: sqlite3.Connection, symbol: str) -> Optional[str]:
@@ -218,7 +266,7 @@ def sync_symbol_with_resources(
     limiter: RateLimiter,
     symbol: str,
     api_key: str,
-) -> int:
+) -> Dict[str, Any]:
     symbol = normalize_symbol(symbol)
     latest_db_date = get_latest_db_trade_date(conn, symbol)
     # 策略：
@@ -259,36 +307,95 @@ def sync_symbol_with_resources(
     else:
         print("Status: incremental update applied")
     print("-" * 60)
-    return inserted
+    return {
+        "status": "ok",
+        "symbol": symbol,
+        "inserted_rows": inserted,
+        "fetch_mode": outputsize,
+        "error_message": None,
+    }
 
 
-def sync_symbols(symbols: List[str], db_path: Path, api_key: str, max_calls_per_minute: int) -> int:
+def _chunk_symbols(symbols: List[str], batch_size: int) -> List[List[str]]:
+    if batch_size <= 0:
+        return [symbols]
+    return [symbols[i:i + batch_size] for i in range(0, len(symbols), batch_size)]
+
+
+def sync_symbols(
+    symbols: List[str],
+    db_path: Path,
+    api_key: str,
+    max_calls_per_minute: int,
+    batch_size: int = 0,
+    with_audit: bool = False,
+    job_name: str = "daily_sync",
+) -> int:
     symbols = [normalize_symbol(s) for s in symbols if str(s).strip()]
     if not symbols:
         raise ValueError("symbols is empty")
 
     conn = ensure_db(db_path)
     limiter = RateLimiter(max_calls=max_calls_per_minute, period_seconds=60.0)
+    if with_audit:
+        ensure_sync_audit_table(conn)
 
     total_inserted = 0
     try:
         print(f"DB file: {db_path}")
         print(f"Symbols count: {len(symbols)}")
         print(f"Rate limit: {max_calls_per_minute} calls/min")
+        if batch_size > 0:
+            print(f"Batch size: {batch_size}")
+        print(f"Audit enabled: {'yes' if with_audit else 'no'}")
         print("=" * 60)
-        for idx, symbol in enumerate(symbols, 1):
-            print(f"[{idx}/{len(symbols)}] Syncing {symbol} ...")
-            try:
-                total_inserted += sync_symbol_with_resources(
-                    conn=conn,
-                    limiter=limiter,
-                    symbol=symbol,
-                    api_key=api_key,
-                )
-            except Exception as exc:
-                print(f"Symbol: {symbol}")
-                print(f"Status: failed ({exc})")
-                print("-" * 60)
+
+        chunks = _chunk_symbols(symbols, batch_size)
+        completed = 0
+        for chunk_idx, chunk in enumerate(chunks, 1):
+            if batch_size > 0:
+                print(f"[Batch {chunk_idx}/{len(chunks)}] symbols={len(chunk)}")
+            for symbol in chunk:
+                completed += 1
+                print(f"[{completed}/{len(symbols)}] Syncing {symbol} ...")
+                started = utc_now_iso()
+                try:
+                    result = sync_symbol_with_resources(
+                        conn=conn,
+                        limiter=limiter,
+                        symbol=symbol,
+                        api_key=api_key,
+                    )
+                    inserted_rows = int(result.get("inserted_rows", 0))
+                    total_inserted += inserted_rows
+                    if with_audit:
+                        insert_sync_audit(
+                            conn=conn,
+                            job_name=job_name,
+                            symbol=symbol,
+                            started_at_utc=started,
+                            finished_at_utc=utc_now_iso(),
+                            status="ok",
+                            inserted_rows=inserted_rows,
+                            fetch_mode=str(result.get("fetch_mode") or ""),
+                            error_message=None,
+                        )
+                except Exception as exc:
+                    print(f"Symbol: {symbol}")
+                    print(f"Status: failed ({exc})")
+                    print("-" * 60)
+                    if with_audit:
+                        insert_sync_audit(
+                            conn=conn,
+                            job_name=job_name,
+                            symbol=symbol,
+                            started_at_utc=started,
+                            finished_at_utc=utc_now_iso(),
+                            status="failed",
+                            inserted_rows=0,
+                            fetch_mode=None,
+                            error_message=str(exc),
+                        )
         print(f"Batch done. Total inserted/updated rows: {total_inserted}")
         return total_inserted
     finally:
@@ -303,6 +410,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="同步 AlphaVantage 日线到 SQLite（支持单标的与批量增量）")
     parser.add_argument("--symbol", help="单只股票代码，例如 AAPL")
     parser.add_argument("--symbols", help="多只股票代码，逗号分隔，例如 AAPL,MSFT,NVDA")
+    parser.add_argument("--default-pool", action="store_true", help="使用默认101股票池（DEFAULT_SYMBOLS）")
     parser.add_argument(
         "--db-path",
         default=str(DEFAULT_DB_PATH),
@@ -314,6 +422,14 @@ def parse_args() -> argparse.Namespace:
         default=75,
         help="AlphaVantage 每分钟最大调用数，默认 75",
     )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=0,
+        help="批次大小（0表示不分批），示例 20",
+    )
+    parser.add_argument("--with-audit", action="store_true", help="将每个symbol同步结果写入sync_audit表")
+    parser.add_argument("--job-name", default="daily_sync", help="审计任务名（with-audit时使用）")
     return parser.parse_args()
 
 
@@ -326,8 +442,10 @@ def main() -> None:
     max_calls = max(1, int(args.max_calls_per_minute))
     single = normalize_symbol(args.symbol) if args.symbol else ""
     batch = parse_symbols_csv(args.symbols) if args.symbols else []
+    pool = DEFAULT_SYMBOLS.copy() if args.default_pool else []
 
     symbols: List[str] = []
+    symbols.extend(pool)
     if single:
         symbols.append(single)
     symbols.extend(batch)
@@ -340,10 +458,18 @@ def main() -> None:
             seen.add(s)
 
     if not deduped:
-        print("❌ 请提供 --symbol 或 --symbols")
+        print("❌ 请提供 --symbol / --symbols / --default-pool")
         raise SystemExit(1)
 
-    sync_symbols(deduped, db_path=db_path, api_key=api_key, max_calls_per_minute=max_calls)
+    sync_symbols(
+        deduped,
+        db_path=db_path,
+        api_key=api_key,
+        max_calls_per_minute=max_calls,
+        batch_size=max(0, int(args.batch_size)),
+        with_audit=bool(args.with_audit),
+        job_name=str(args.job_name),
+    )
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
-# alpaca-live-trading 同步机制说明
+# alpaca-live-trading 同步与数据准备说明
 
-本文档说明当前在 `alpaca-live-trading` 中实现的 AlphaVantage 日线同步方案。
+本文档说明当前在 `alpaca-live-trading` 中实现的 AlphaVantage 数据同步方案（含日线与基本面）。
 
 ## 目标
 
@@ -13,6 +13,9 @@
 ## 脚本位置
 
 - `scripts/sync_alpha_daily_to_sqlite.py`
+- `scripts/sync_alpha_fundamentals_to_sqlite.py`
+- `scripts/query_fundamentals_sqlite.py`
+- `scripts/query_prices_sqlite.py`
 
 ## 数据库设计
 
@@ -23,6 +26,9 @@
 核心表：
 
 - `stock_daily`
+- `fundamentals_quarterly`
+- `fundamentals_overview_daily`
+- `sync_audit`
 
 字段与约束：
 
@@ -40,7 +46,7 @@
 - 主键保证同一股票同一交易日唯一
 - 采用 `ON CONFLICT ... DO UPDATE` 保证重复同步幂等
 
-## 同步策略
+## 日线同步策略
 
 当前已实现三段式策略：
 
@@ -75,6 +81,28 @@
 
 - `--max-calls-per-minute`
 
+## 基本面同步（5年季度）
+
+`scripts/sync_alpha_fundamentals_to_sqlite.py` 会拉取以下接口并入库：
+
+- `OVERVIEW`
+- `INCOME_STATEMENT`
+- `BALANCE_SHEET`
+- `CASH_FLOW`
+
+季度表（`fundamentals_quarterly`）主要字段：
+
+- 收入/利润：`revenue`, `operating_income`, `net_income`
+- 现金流：`operating_cashflow`, `capital_expenditures`, `free_cashflow`
+- 真实性辅助：`change_in_receivables`, `change_in_inventory`
+- 资产负债：`total_assets`, `total_liabilities`, `total_shareholder_equity`, `cash_and_short_term_investments`, `current_debt`, `long_term_debt`
+
+overview 快照表（`fundamentals_overview_daily`）主要字段：
+
+- 估值：`market_cap`, `pe_ratio`
+- 质量指标：`profit_margin`, `operating_margin_ttm`, `roe_ttm`, `roa_ttm`
+- short-interest 代理字段：`short_ratio`, `shares_short`, `shares_short_prior_month`
+
 ## 用法
 
 ### 1) 单股票同步
@@ -104,6 +132,42 @@ python scripts/sync_alpha_daily_to_sqlite.py \
   --db-path ./data/stock_daily.sqlite
 ```
 
+### 5) 基本面同步（单只/批量/默认池）
+
+```bash
+# 单只
+python scripts/sync_alpha_fundamentals_to_sqlite.py --symbol AAPL --years 5
+
+# 批量
+python scripts/sync_alpha_fundamentals_to_sqlite.py --symbols AAPL,NVDA,BABA --years 5 --with-audit
+
+# 默认101池（可配分批）
+python scripts/sync_alpha_fundamentals_to_sqlite.py --default-pool --years 5 --batch-size 20 --with-audit
+```
+
+### 6) 本地基本面查询
+
+```bash
+# 文本输出
+python scripts/query_fundamentals_sqlite.py --symbol BABA --quarters 8
+
+# JSON输出
+python scripts/query_fundamentals_sqlite.py --symbol BABA --quarters 8 --json
+```
+
+### 7) 本地历史股价查询（SQLite）
+
+```bash
+# 最近30天（默认）
+python scripts/query_prices_sqlite.py --symbol BABA
+
+# 多股票 + 指定天数
+python scripts/query_prices_sqlite.py --symbols AAPL,NVDA,BABA --days 60
+
+# 指定日期区间 + JSON
+python scripts/query_prices_sqlite.py --symbol BABA --start-date 2026-02-01 --end-date 2026-03-31 --json
+```
+
 ## 配置来源
 
 脚本通过 `scripts/_config.py` 读取：
@@ -112,9 +176,23 @@ python scripts/sync_alpha_daily_to_sqlite.py \
 
 请确保 `config.yaml` 已正确配置 AlphaVantage API Key。
 
+## 当前进度（W-Bottom 数据准备）
+
+已完成：
+
+- 日线增量同步脚本（首次 full，后续 compact，fallback full）
+- 日线脚本增强：`--default-pool`、`--batch-size`、`--with-audit`
+- 基本面同步脚本（5年季度窗口）并已验证 AAPL/NVDA/BABA
+- 本地基本面查询脚本（避免手写 SQL）
+
+待完成（TODO）：
+
+- 计算 `w_bottom_breakout` 特征表（RPS120/RPS250、波动率、EV、FCF/EV、short-interest代理）
+- 数据完整性校验脚本（覆盖率、可计算率、ready 结论）
+- README 增加特征脚本与校验脚本使用示例
+
 ## 后续可扩展方向
 
-- 增加同步审计表（记录每次批量任务耗时、成功/失败明细）
 - 增加重试与指数退避策略（针对瞬时网络抖动）
 - 按 symbol 并发拉取（在总限速约束下）
-- 接入策略引擎直接消费 `stock_daily` 数据
+- 接入策略引擎直接消费 `stock_daily` + `fundamentals_*` 数据
