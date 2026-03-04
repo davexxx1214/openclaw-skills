@@ -41,6 +41,19 @@ alpaca:
   api_key: "your_alpaca_api_key"
   secret_key: "your_alpaca_secret_key"
   paper: true
+
+# 策略自动交易配置（新增）
+strategy:
+  enabled: true
+  names:
+    - news_momentum
+    - market_gate_trend
+  min_confidence: 0.6
+
+risk:
+  max_position_pct: 0.1
+  max_positions: 5
+  max_trade_notional: 2000
 ```
 
 > 注意：`config.yaml` 包含真实 API Key，已加入 `.gitignore`，不会被提交到 Git。
@@ -102,6 +115,30 @@ python ./scripts/run_analysis_trade_pipeline.py \
   --trade-plan-file ./data/trade_plan.json \
   --execute-trades
 ```
+
+**自动策略交易（新增）**
+
+当 `config.yaml` 中设置 `strategy.enabled: true` 且未传 `--trade-plan-file` 时，pipeline 会自动：
+
+1. 基于配置的 `strategy.names` 运行策略（首版内置 `news_momentum` / `market_gate_trend`）
+2. 生成 `generated_trade_plan`
+3. 执行风控拦截（`risk.*`）
+4. 若开启 `--execute-trades`，执行拦截后的交易计划
+
+```bash
+# 自动生成交易计划（仅分析不下单）
+python ./scripts/run_analysis_trade_pipeline.py
+
+# 自动生成交易计划并执行（受市场门控 + 风控限制）
+python ./scripts/run_analysis_trade_pipeline.py --execute-trades
+```
+
+输出 JSON 中新增字段（`trade_execution` 下）：
+- `strategy_config` / `risk_config`
+- `generated_trade_plan`
+- `strategy_decisions`
+- `risk_rejections`
+- `trade_plan_source`（`strategy_auto` 或 `manual_file`）
 
 ## 交易执行与记录规则（重要）
 

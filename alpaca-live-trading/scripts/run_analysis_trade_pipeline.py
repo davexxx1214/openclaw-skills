@@ -26,10 +26,14 @@ from typing import Any, Dict, List, Optional, Tuple
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
+from _config import get_risk_config, get_strategy_config, load_config
+from order_builder import build_trade_plan
 from query_fundamentals import fetch_fundamentals_for_symbol
 from query_market_news import fetch_news_per_ticker
 from query_polymarket_sentiment import get_financial_sentiment
 from query_stock_prices import DEFAULT_SYMBOLS, _load_market_snapshot, get_quote
+from risk_guard import apply_risk_guard
+from strategy_engine import run_strategies
 
 
 def _read_jsonl(path: Path) -> List[Dict[str, Any]]:
@@ -50,6 +54,22 @@ def _read_jsonl(path: Path) -> List[Dict[str, Any]]:
 
 def _tail_rows(rows: List[Dict[str, Any]], n: int = 5) -> List[Dict[str, Any]]:
     return rows[-n:] if len(rows) > n else rows
+
+
+def _extract_latest_account_snapshot(balance_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    for row in reversed(balance_rows or []):
+        account = row.get("account")
+        if isinstance(account, dict):
+            return account
+    return {}
+
+
+def _extract_latest_positions_snapshot(balance_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    for row in reversed(balance_rows or []):
+        positions = row.get("positions")
+        if isinstance(positions, list):
+            return positions
+    return []
 
 
 def _execute_trade_plan(trade_plan: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -240,6 +260,10 @@ def _dedupe_keep_order(items: List[str]) -> List[str]:
 
 
 def main() -> None:
+    config = load_config()
+    strategy_config = get_strategy_config(config)
+    risk_config = get_risk_config(config)
+
     parser = argparse.ArgumentParser(description="运行 Alpaca 分析+交易一体化流程")
     parser.add_argument(
         "--tickers",
@@ -372,6 +396,52 @@ def main() -> None:
     # 可选交易执行（受市场门控）
     trade_results: List[Dict[str, Any]] = []
     trade_plan: List[Dict[str, Any]] = []
+    strategy_decisions: Dict[str, Any] = {}
+    generated_trade_plan: List[Dict[str, Any]] = []
+    risk_rejections: List[Dict[str, Any]] = []
+    account_snapshot = _extract_latest_account_snapshot(old_balances)
+    positions_snapshot = _extract_latest_positions_snapshot(old_balances)
+
+    if strategy_config.get("enabled"):
+        strategy_context = {
+            "ranking": ranking,
+            "stage1_news": stage1_news,
+            "deep_news": deep_news,
+            "quotes": quotes,
+            "selected_top_tickers": top10,
+            "deep_universe": deep_universe,
+            "benchmark_tickers": benchmark_tickers,
+            "market_gate_score": market_gate_score,
+            "account_snapshot": account_snapshot,
+            "positions_snapshot": positions_snapshot,
+        }
+        strategy_decisions = run_strategies(
+            strategy_names=strategy_config.get("names", []),
+            context=strategy_context,
+            min_confidence=strategy_config.get("min_confidence", 0.6),
+        )
+        build_result = build_trade_plan(
+            signals=strategy_decisions.get("signals_accepted", []),
+            risk_config=risk_config,
+            account_snapshot=account_snapshot,
+            positions_snapshot=positions_snapshot,
+        )
+        generated_trade_plan = build_result.get("trade_plan", [])
+        strategy_decisions["order_build"] = {
+            "skipped_signals": build_result.get("skipped_signals", []),
+            "assumptions": build_result.get("assumptions", {}),
+        }
+
+        risk_result = apply_risk_guard(
+            trade_plan=generated_trade_plan,
+            risk_config=risk_config,
+            account_snapshot=account_snapshot,
+            positions_snapshot=positions_snapshot,
+        )
+        generated_trade_plan = risk_result.get("accepted_plan", [])
+        risk_rejections = risk_result.get("rejections", [])
+        strategy_decisions["risk_guard"] = risk_result.get("risk_snapshot", {})
+
     if args.trade_plan_file:
         plan_path = Path(args.trade_plan_file)
         if plan_path.exists():
@@ -384,6 +454,11 @@ def main() -> None:
                 trade_plan = []
         else:
             print(f"⚠️ 交易计划文件不存在: {plan_path}")
+    else:
+        trade_plan = generated_trade_plan
+
+    if strategy_config.get("enabled") and not args.trade_plan_file:
+        print(f"🧠 策略自动生成交易计划: {len(trade_plan)} 条")
 
     if args.execute_trades and trade_plan and should_trade_by_market:
         print(f"🧾 执行交易计划，共 {len(trade_plan)} 条...")
@@ -442,7 +517,14 @@ def main() -> None:
         },
         "trade_execution": {
             "enabled": bool(args.execute_trades),
+            "config_strategy_enabled": bool(strategy_config.get("enabled")),
+            "strategy_config": strategy_config,
+            "risk_config": risk_config,
+            "trade_plan_source": "manual_file" if args.trade_plan_file else ("strategy_auto" if strategy_config.get("enabled") else "none"),
             "trade_plan": trade_plan,
+            "generated_trade_plan": generated_trade_plan,
+            "strategy_decisions": strategy_decisions,
+            "risk_rejections": risk_rejections,
             "results": trade_results,
         },
         "state_after": {

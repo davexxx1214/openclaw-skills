@@ -16,3 +16,21 @@ alpaca:
   paper: true
 
 # Polymarket - 不需要 API Key（公开 API）
+
+# 策略执行配置（自动生成交易计划）
+strategy:
+  enabled: true
+  names:
+    - news_momentum
+    - market_gate_trend
+  # 信号置信度阈值（0-1）
+  min_confidence: 0.6
+
+# 基础风控配置
+risk:
+  # 单只标的最大仓位占账户现金比例（0-1）
+  max_position_pct: 0.1
+  # 最大持仓标的数
+  max_positions: 5
+  # 单笔交易最大金额（美元）
+  max_trade_notional: 2000

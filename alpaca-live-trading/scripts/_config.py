@@ -24,6 +24,16 @@ except ImportError:
 SKILL_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_FILE = SKILL_ROOT / "config.yaml"
 CONFIG_EXAMPLE_FILE = SKILL_ROOT / "config.example.yaml"
+DEFAULT_STRATEGY_CONFIG: Dict[str, Any] = {
+    "enabled": False,
+    "names": [],
+    "min_confidence": 0.6,
+}
+DEFAULT_RISK_CONFIG: Dict[str, Any] = {
+    "max_position_pct": 0.1,
+    "max_positions": 5,
+    "max_trade_notional": 2000.0,
+}
 
 
 def load_config(config_path: Path = None) -> Dict[str, Any]:
@@ -90,3 +100,80 @@ def get_alpaca_credentials(config: Dict[str, Any] = None) -> tuple:
         print("❌ Alpaca API 凭证未配置，请在 config.yaml 中填入真实 Key")
         sys.exit(1)
     return api_key, secret_key, paper
+
+
+def _clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+def _to_bool(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
+def get_strategy_config(config: Dict[str, Any] = None) -> Dict[str, Any]:
+    """
+    获取策略配置，带默认值和基础校验。
+    """
+    if config is None:
+        config = load_config()
+
+    raw = config.get("strategy", {}) if isinstance(config, dict) else {}
+    if not isinstance(raw, dict):
+        raw = {}
+
+    names = raw.get("names", DEFAULT_STRATEGY_CONFIG["names"])
+    if not isinstance(names, list):
+        names = []
+    names = [str(name).strip() for name in names if str(name).strip()]
+
+    try:
+        min_conf = float(raw.get("min_confidence", DEFAULT_STRATEGY_CONFIG["min_confidence"]))
+    except (TypeError, ValueError):
+        min_conf = float(DEFAULT_STRATEGY_CONFIG["min_confidence"])
+
+    return {
+        "enabled": _to_bool(raw.get("enabled", DEFAULT_STRATEGY_CONFIG["enabled"]), DEFAULT_STRATEGY_CONFIG["enabled"]),
+        "names": names,
+        "min_confidence": _clamp(min_conf, 0.0, 1.0),
+    }
+
+
+def get_risk_config(config: Dict[str, Any] = None) -> Dict[str, Any]:
+    """
+    获取风控配置，带默认值和基础校验。
+    """
+    if config is None:
+        config = load_config()
+
+    raw = config.get("risk", {}) if isinstance(config, dict) else {}
+    if not isinstance(raw, dict):
+        raw = {}
+
+    try:
+        max_position_pct = float(raw.get("max_position_pct", DEFAULT_RISK_CONFIG["max_position_pct"]))
+    except (TypeError, ValueError):
+        max_position_pct = float(DEFAULT_RISK_CONFIG["max_position_pct"])
+
+    try:
+        max_positions = int(raw.get("max_positions", DEFAULT_RISK_CONFIG["max_positions"]))
+    except (TypeError, ValueError):
+        max_positions = int(DEFAULT_RISK_CONFIG["max_positions"])
+
+    try:
+        max_trade_notional = float(raw.get("max_trade_notional", DEFAULT_RISK_CONFIG["max_trade_notional"]))
+    except (TypeError, ValueError):
+        max_trade_notional = float(DEFAULT_RISK_CONFIG["max_trade_notional"])
+
+    return {
+        "max_position_pct": _clamp(max_position_pct, 0.0, 1.0),
+        "max_positions": max(max_positions, 1),
+        "max_trade_notional": max(max_trade_notional, 0.0),
+    }
