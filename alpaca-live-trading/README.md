@@ -184,12 +184,38 @@ python scripts/query_prices_sqlite.py --symbol BABA --start-date 2026-02-01 --en
 - 日线脚本增强：`--default-pool`、`--batch-size`、`--with-audit`
 - 基本面同步脚本（5年季度窗口）并已验证 AAPL/NVDA/BABA
 - 本地基本面查询脚本（避免手写 SQL）
+- pipeline 支持单策略配置（`strategy.name`）并优先读取
+- pipeline 支持两轮筛选：
+  - 第一轮：按策略（如 `w_bottom_breakout`）筛出 Top 候选
+  - 第二轮：对候选做基本面 + 技术面 + Polymarket 深度分析，并生成交易计划
 
 待完成（TODO）：
 
-- 计算 `w_bottom_breakout` 特征表（RPS120/RPS250、波动率、EV、FCF/EV、short-interest代理）
+- 计算 `w_bottom_breakout` 特征表（RPS120/RPS250、波动率、EV、FCF/EV、short-interest代理）并落库
 - 数据完整性校验脚本（覆盖率、可计算率、ready 结论）
-- README 增加特征脚本与校验脚本使用示例
+- 在 README 增加特征脚本与校验脚本使用示例
+
+## 两轮策略流程（当前推荐）
+
+在 `config.yaml` 中配置：
+
+```yaml
+strategy:
+  enabled: true
+  name: w_bottom_breakout
+  min_confidence: 0.6
+  prefilter_top_k: 10
+```
+
+运行：
+
+```bash
+# 仅分析，不下单
+python scripts/run_analysis_trade_pipeline.py
+
+# 分析 + 自动执行（受 market gate + risk guard 控制）
+python scripts/run_analysis_trade_pipeline.py --execute-trades
+```
 
 ## 后续可扩展方向
 

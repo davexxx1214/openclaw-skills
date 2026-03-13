@@ -213,6 +213,83 @@ def _select_top_by_news(news_items: List[Dict[str, Any]], top_k: int) -> Tuple[L
     return selected, ranked
 
 
+def _to_ratio_01(value: Optional[float], low: float, high: float) -> float:
+    if value is None or high <= low:
+        return 0.0
+    return max(0.0, min(1.0, (value - low) / (high - low)))
+
+
+def _latest_quarter_growth(
+    quarterly: List[Dict[str, Any]],
+    key: str,
+) -> Optional[float]:
+    if not quarterly or len(quarterly) < 2:
+        return None
+    latest = _to_float(quarterly[0].get(key))
+    prev = _to_float(quarterly[1].get(key))
+    if latest is None or prev in (None, 0):
+        return None
+    return latest / prev - 1.0
+
+
+def _compute_round2_scores(
+    candidates: List[str],
+    fundamentals: List[Dict[str, Any]],
+    quotes: List[Dict[str, Any]],
+    news_items: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    fundamentals_map = {str(x.get("symbol", "")).upper(): x for x in fundamentals if isinstance(x, dict)}
+    quote_map = {str(x.get("symbol", "")).upper().split(":")[-1]: x for x in quotes if isinstance(x, dict)}
+    news_rank_map = {str(x.get("ticker", "")).upper(): x for x in [_compute_news_rank(item) for item in news_items]}
+
+    scored: List[Dict[str, Any]] = []
+    for symbol in candidates:
+        s = str(symbol).upper()
+        block = fundamentals_map.get(s, {})
+        overview = block.get("company_overview", {}) if isinstance(block, dict) else {}
+        quarterly = block.get("quarterly_key_financials", []) if isinstance(block, dict) else []
+        quote = quote_map.get(s, {})
+        news_rank = news_rank_map.get(s, {})
+
+        roe = _to_float(overview.get("roe_ttm"))
+        profit_margin = _to_float(overview.get("profit_margin"))
+        rev_growth = _latest_quarter_growth(quarterly, "revenue")
+        fcf_growth = _latest_quarter_growth(quarterly, "free_cashflow")
+        rec_all = _to_float((quote.get("technical") or {}).get("recommend_all")) if isinstance(quote, dict) else None
+        momentum = _to_float(news_rank.get("momentum_score"))
+
+        fundamental_score = (
+            0.35 * _to_ratio_01(roe, 0.0, 0.25)
+            + 0.25 * _to_ratio_01(profit_margin, 0.0, 0.30)
+            + 0.20 * _to_ratio_01(rev_growth, -0.20, 0.50)
+            + 0.20 * _to_ratio_01(fcf_growth, -0.50, 1.00)
+        )
+        technical_score = _to_ratio_01(rec_all, -1.0, 1.0)
+        news_score = _to_ratio_01(momentum, -0.30, 0.30)
+        composite = 0.50 * fundamental_score + 0.30 * technical_score + 0.20 * news_score
+
+        scored.append(
+            {
+                "symbol": s,
+                "score": round(composite, 6),
+                "fundamental_score": round(fundamental_score, 6),
+                "technical_score": round(technical_score, 6),
+                "news_score": round(news_score, 6),
+                "inputs": {
+                    "roe_ttm": roe,
+                    "profit_margin": profit_margin,
+                    "revenue_growth_qoq": rev_growth,
+                    "fcf_growth_qoq": fcf_growth,
+                    "recommend_all": rec_all,
+                    "momentum_score": momentum,
+                },
+            }
+        )
+
+    scored.sort(key=lambda x: x["score"], reverse=True)
+    return scored
+
+
 def _extract_polymarket_market_signal(polymarket_text: str) -> Optional[float]:
     if not polymarket_text:
         return None
@@ -257,6 +334,11 @@ def _dedupe_keep_order(items: List[str]) -> List[str]:
             out.append(x)
             seen.add(x)
     return out
+
+
+def _normalize_symbol(symbol: Any) -> str:
+    raw = str(symbol or "").upper().strip()
+    return raw.split(":")[-1] if raw else ""
 
 
 def main() -> None:
@@ -330,24 +412,43 @@ def main() -> None:
     old_positions = _read_jsonl(position_path)
     old_balances = _read_jsonl(balance_path)
 
-    # 第一阶段：对全池做新闻/情绪筛选
-    print("📰 第一阶段：101池新闻与情绪筛选...")
-    stage1_news = fetch_news_per_ticker(
-        tickers=tickers,
-        per_ticker_limit=max(1, args.news_limit),
-        sort="LATEST",
-        request_interval=interval,
-    )
-    top_k = max(1, args.prefilter_top_k)
-    top10, ranking = _select_top_by_news(stage1_news, top_k=top_k)
-    print(f"✅ 第一阶段完成，入选 Top{top_k}: {top10}")
+    # 第一阶段：基于策略进行预筛选（默认 w_bottom_breakout）
+    selected_strategy = str(strategy_config.get("name", "")).strip().lower()
+    top_k = int(strategy_config.get("prefilter_top_k") or args.prefilter_top_k or 10)
+    top_k = max(top_k, 1)
+
+    print(f"🧠 第一阶段：策略预筛选（strategy={selected_strategy or 'N/A'}，Top{top_k}）...")
+    snapshot = _load_market_snapshot()
+    prefilter_quotes: List[Dict[str, Any]] = [get_quote(ticker, snapshot) for ticker in tickers]
+    prefilter_context = {
+        "universe_tickers": tickers,
+        "quotes": prefilter_quotes,
+        "history_db_path": str(SCRIPT_DIR.parent / "data" / "stock_daily.sqlite"),
+        "history_lookback_days": 420,
+        "strategy_prefilter_top_k": top_k,
+    }
+    round1_decisions: Dict[str, Any] = {}
+    round1_candidates_signals: List[Dict[str, Any]] = []
+    if strategy_config.get("enabled") and selected_strategy:
+        round1_decisions = run_strategies(
+            strategy_names=[selected_strategy],
+            context=prefilter_context,
+            min_confidence=strategy_config.get("min_confidence", 0.6),
+        )
+        round1_candidates_signals = round1_decisions.get("signals_accepted", []) or []
+        if not round1_candidates_signals:
+            round1_candidates_signals = (round1_decisions.get("signals_all", []) or [])[:top_k]
+
+    round1_candidates = [_normalize_symbol(item.get("symbol")) for item in round1_candidates_signals if item.get("symbol")]
+    round1_candidates = _dedupe_keep_order([x for x in round1_candidates if x])[:top_k]
+    print(f"✅ 第一阶段完成，候选数: {len(round1_candidates)}，候选: {round1_candidates}")
 
     benchmark_tickers = [x.strip().upper() for x in args.benchmark_tickers.split(",") if x.strip()]
-    deep_universe = _dedupe_keep_order(top10 + benchmark_tickers)
+    deep_universe = _dedupe_keep_order(round1_candidates + benchmark_tickers)
     print(f"🔎 第二阶段深度分析标的数: {len(deep_universe)}")
 
-    # 第二阶段：深度分析（Top10 + QQQ/SPY）
-    print("📰 第二阶段：Top标的 + 基准ETF 新闻情绪...")
+    # 第二阶段：深度分析（策略候选 + 基准ETF）
+    print("📰 第二阶段：候选标的 + 基准ETF 新闻情绪...")
     deep_news = fetch_news_per_ticker(
         tickers=deep_universe,
         per_ticker_limit=max(1, args.news_limit),
@@ -379,10 +480,17 @@ def main() -> None:
 
     # tvscreener 价格 + 技术面
     print("📈 第二阶段：tvscreener 价格与技术面...")
-    snapshot = _load_market_snapshot()
     quotes: List[Dict[str, Any]] = []
     for ticker in deep_universe:
         quotes.append(get_quote(ticker, snapshot))
+
+    _, deep_news_ranking = _select_top_by_news(deep_news, top_k=max(len(round1_candidates), 1))
+    round2_scores = _compute_round2_scores(
+        candidates=round1_candidates,
+        fundamentals=fundamentals,
+        quotes=quotes,
+        news_items=deep_news,
+    )
 
     benchmark_news_signal = _extract_benchmark_signal(deep_news, benchmark_tickers)
     polymarket_signal = _extract_polymarket_market_signal(polymarket if isinstance(polymarket, str) else "")
@@ -403,25 +511,42 @@ def main() -> None:
     positions_snapshot = _extract_latest_positions_snapshot(old_balances)
 
     if strategy_config.get("enabled"):
-        strategy_context = {
-            "ranking": ranking,
-            "stage1_news": stage1_news,
-            "deep_news": deep_news,
-            "quotes": quotes,
-            "selected_top_tickers": top10,
-            "deep_universe": deep_universe,
-            "benchmark_tickers": benchmark_tickers,
-            "market_gate_score": market_gate_score,
-            "account_snapshot": account_snapshot,
-            "positions_snapshot": positions_snapshot,
-        }
-        strategy_decisions = run_strategies(
-            strategy_names=strategy_config.get("names", []),
-            context=strategy_context,
-            min_confidence=strategy_config.get("min_confidence", 0.6),
-        )
+        strategy_decisions = dict(round1_decisions or {})
+        round2_score_map = {item["symbol"]: item for item in round2_scores}
+        round2_pass_symbols = [item["symbol"] for item in round2_scores if item.get("score", 0.0) >= 0.4]
+        if not round2_pass_symbols:
+            round2_pass_symbols = [item["symbol"] for item in round2_scores[:top_k]]
+        round2_pass_symbols = _dedupe_keep_order(round2_pass_symbols)[:top_k]
+
+        source_signals = strategy_decisions.get("signals_accepted", []) or strategy_decisions.get("signals_all", []) or []
+        filtered_signals: List[Dict[str, Any]] = []
+        for signal in source_signals:
+            symbol = _normalize_symbol(signal.get("symbol"))
+            if not symbol or symbol not in round2_pass_symbols:
+                continue
+            row = round2_score_map.get(symbol, {})
+            base_conf = _to_float(signal.get("confidence")) or 0.0
+            round2_conf = _to_float(row.get("score")) or 0.0
+            enriched = dict(signal)
+            enriched["confidence"] = max(0.0, min(0.95, 0.7 * base_conf + 0.3 * round2_conf))
+            md = dict(enriched.get("metadata") or {})
+            md["round2_score"] = row.get("score")
+            md["round2_components"] = {
+                "fundamental_score": row.get("fundamental_score"),
+                "technical_score": row.get("technical_score"),
+                "news_score": row.get("news_score"),
+            }
+            enriched["metadata"] = md
+            filtered_signals.append(enriched)
+
+        strategy_decisions["selected_strategy"] = selected_strategy
+        strategy_decisions["round1_candidates"] = round1_candidates
+        strategy_decisions["round2_scores"] = round2_scores
+        strategy_decisions["round2_pass_symbols"] = round2_pass_symbols
+        strategy_decisions["signals_after_round2"] = filtered_signals
+
         build_result = build_trade_plan(
-            signals=strategy_decisions.get("signals_accepted", []),
+            signals=filtered_signals,
             risk_config=risk_config,
             account_snapshot=account_snapshot,
             positions_snapshot=positions_snapshot,
@@ -480,15 +605,17 @@ def main() -> None:
         "pipeline": {
             "stage1_prefilter": {
                 "input_universe_size": len(tickers),
-                "news_limit_per_ticker": args.news_limit,
+                "strategy": selected_strategy,
                 "top_k": top_k,
-                "ranking": ranking,
-                "selected_top_tickers": top10,
+                "candidates": round1_candidates,
+                "strategy_decisions": round1_decisions,
             },
             "stage2_deep_analysis": {
                 "benchmark_tickers": benchmark_tickers,
                 "deep_universe": deep_universe,
                 "deep_universe_size": len(deep_universe),
+                "round2_scores": round2_scores,
+                "deep_news_ranking": deep_news_ranking,
             },
             "market_gate": {
                 "benchmark_news_signal": benchmark_news_signal,
@@ -502,7 +629,6 @@ def main() -> None:
             "calls_per_minute": args.av_calls_per_minute,
             "request_interval_seconds": interval,
             "fundamentals": fundamentals,
-            "news_sentiment_stage1": stage1_news,
             "news_sentiment_stage2": deep_news,
         },
         "polymarket_sentiment": polymarket,

@@ -26,8 +26,10 @@ CONFIG_FILE = SKILL_ROOT / "config.yaml"
 CONFIG_EXAMPLE_FILE = SKILL_ROOT / "config.example.yaml"
 DEFAULT_STRATEGY_CONFIG: Dict[str, Any] = {
     "enabled": False,
+    "name": "",
     "names": [],
     "min_confidence": 0.6,
+    "prefilter_top_k": 10,
 }
 DEFAULT_RISK_CONFIG: Dict[str, Any] = {
     "max_position_pct": 0.1,
@@ -129,10 +131,18 @@ def get_strategy_config(config: Dict[str, Any] = None) -> Dict[str, Any]:
     if not isinstance(raw, dict):
         raw = {}
 
+    name = str(raw.get("name", DEFAULT_STRATEGY_CONFIG["name"]) or "").strip()
+
     names = raw.get("names", DEFAULT_STRATEGY_CONFIG["names"])
     if not isinstance(names, list):
         names = []
     names = [str(name).strip() for name in names if str(name).strip()]
+    selected_name = name or (names[0] if names else "")
+
+    try:
+        prefilter_top_k = int(raw.get("prefilter_top_k", DEFAULT_STRATEGY_CONFIG["prefilter_top_k"]))
+    except (TypeError, ValueError):
+        prefilter_top_k = int(DEFAULT_STRATEGY_CONFIG["prefilter_top_k"])
 
     try:
         min_conf = float(raw.get("min_confidence", DEFAULT_STRATEGY_CONFIG["min_confidence"]))
@@ -141,8 +151,10 @@ def get_strategy_config(config: Dict[str, Any] = None) -> Dict[str, Any]:
 
     return {
         "enabled": _to_bool(raw.get("enabled", DEFAULT_STRATEGY_CONFIG["enabled"]), DEFAULT_STRATEGY_CONFIG["enabled"]),
+        "name": selected_name,
         "names": names,
         "min_confidence": _clamp(min_conf, 0.0, 1.0),
+        "prefilter_top_k": max(prefilter_top_k, 1),
     }
 
 

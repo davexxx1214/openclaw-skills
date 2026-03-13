@@ -45,10 +45,12 @@ alpaca:
 # 策略自动交易配置（新增）
 strategy:
   enabled: true
+  name: w_bottom_breakout
   names:
     - news_momentum
     - market_gate_trend
   min_confidence: 0.6
+  prefilter_top_k: 10
 
 risk:
   max_position_pct: 0.1
@@ -120,7 +122,7 @@ python ./scripts/run_analysis_trade_pipeline.py \
 
 当 `config.yaml` 中设置 `strategy.enabled: true` 且未传 `--trade-plan-file` 时，pipeline 会自动：
 
-1. 基于配置的 `strategy.names` 运行策略（首版内置 `news_momentum` / `market_gate_trend`）
+1. 基于配置的 `strategy.name` 运行策略（未设置时回退 `strategy.names[0]`）
 2. 生成 `generated_trade_plan`
 3. 执行风控拦截（`risk.*`）
 4. 若开启 `--execute-trades`，执行拦截后的交易计划

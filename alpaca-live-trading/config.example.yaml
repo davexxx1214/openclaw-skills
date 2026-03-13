@@ -20,11 +20,16 @@ alpaca:
 # 策略执行配置（自动生成交易计划）
 strategy:
   enabled: true
+  # 单策略模式：优先读取 name
+  name: w_bottom_breakout
+  # 兼容旧版多策略（未设置 name 时使用 names[0]）
   names:
     - news_momentum
     - market_gate_trend
   # 信号置信度阈值（0-1）
   min_confidence: 0.6
+  # 第一轮策略预筛选保留数量
+  prefilter_top_k: 10
 
 # 基础风控配置
 risk:
