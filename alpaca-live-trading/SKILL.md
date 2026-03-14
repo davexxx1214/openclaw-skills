@@ -68,18 +68,24 @@ risk:
 
 默认流程（独立 Skill，不依赖 MCP）：
 
-1. 读取历史记录：`position.jsonl` + `balance.jsonl`
-2. 第一阶段（101 -> 10）：  
-   - 对默认股票池（NASDAQ 100 + QQQ，共 101 只）只拉取新闻与情绪（默认每只 5 条）  
-   - 按新闻动量分数排序，筛选 Top 10
-3. 第二阶段（深度分析）：  
-   - 对 Top 10 + `QQQ` + `SPY` 做深度分析  
+1. **先同步默认股票池到 SQLite（必须）**  
+   - 同步目标：默认股票池（NASDAQ 100 + QQQ，共 101 只）  
+   - 若本地不存在历史数据：自动全量同步（`outputsize=full`）  
+   - 若本地已有历史数据：自动增量同步（`outputsize=compact`，必要时 fallback full）  
+2. 读取历史记录：`position.jsonl` + `balance.jsonl`
+3. 第一阶段（101 -> TopK）：  
+   - 基于策略（如 `w_bottom_breakout`）在本地 SQLite 日线数据上做预筛选
+4. 第二阶段（深度分析）：  
+   - 对第一阶段候选 + `QQQ` + `SPY` 做深度分析  
    - 包含：基本面、新闻情绪、Polymarket 赔率、tvscreener 价格与技术面
-4. 市场门控：使用 `QQQ/SPY` 与 Polymarket 信号判断是否允许执行交易
-5. 若门控通过则执行交易（可选），并更新 `position.jsonl` + `balance.jsonl`
+5. 市场门控：使用 `QQQ/SPY` 与 Polymarket 信号判断是否允许执行交易
+6. 若门控通过则执行交易（可选），并更新 `position.jsonl` + `balance.jsonl`
 
 ```bash
-# 仅跑分析（默认 101 只）
+# Step 1: 先同步默认股票池到 SQLite（必须先执行）
+python ./scripts/sync_alpha_daily_to_sqlite.py --default-pool --with-audit
+
+# Step 2: 再跑分析（默认股票池）
 python ./scripts/run_analysis_trade_pipeline.py
 
 # 指定股票池并输出结果文件

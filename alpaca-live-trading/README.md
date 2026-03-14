@@ -186,14 +186,14 @@ python scripts/query_prices_sqlite.py --symbol BABA --start-date 2026-02-01 --en
 - 本地基本面查询脚本（避免手写 SQL）
 - pipeline 支持单策略配置（`strategy.name`）并优先读取
 - pipeline 支持两轮筛选：
-  - 第一轮：按策略（如 `w_bottom_breakout`）筛出 Top 候选
-  - 第二轮：对候选做基本面 + 技术面 + Polymarket 深度分析，并生成交易计划
+  - 第一轮：按策略（如 `w_bottom_breakout`）筛出候选（`prefilter_top_k` 是上限，不保底）
+  - 第二轮：对候选 + 基准ETF 做 AlphaVantage 新闻/基本面 + tvscreener + Polymarket 深度分析，并生成交易计划
 
-待完成（TODO）：
+待完成（TODO，当前仍未实现）：
 
-- 计算 `w_bottom_breakout` 特征表（RPS120/RPS250、波动率、EV、FCF/EV、short-interest代理）并落库
-- 数据完整性校验脚本（覆盖率、可计算率、ready 结论）
-- 在 README 增加特征脚本与校验脚本使用示例
+- 计算 `w_bottom_breakout` 特征表（RPS120/RPS250、波动率、EV、FCF/EV、short-interest 代理）并落库
+- 增加数据完整性校验脚本（覆盖率、可计算率、ready 结论）
+- 在 README 增加“特征脚本 + 校验脚本”使用示例（待上述脚本落地后补充）
 
 ## 两轮策略流程（当前推荐）
 
@@ -216,6 +216,54 @@ python scripts/run_analysis_trade_pipeline.py
 # 分析 + 自动执行（受 market gate + risk guard 控制）
 python scripts/run_analysis_trade_pipeline.py --execute-trades
 ```
+
+### 二阶段会收集哪些数据
+
+第二阶段分析池为：`第一阶段候选 + benchmark_tickers(默认 QQQ,SPY)`。
+
+- AlphaVantage 新闻情绪：`fetch_news_per_ticker`（每只默认 5 条，可通过 `--news-limit` 调整）
+- AlphaVantage 基本面：`fetch_fundamentals_for_symbol`（`OVERVIEW / INCOME_STATEMENT / BALANCE_SHEET / CASH_FLOW / EARNINGS`）
+- tvscreener 价格与技术面：`get_quote`（当前会用到 `technical.recommend_all` 与价格）
+- Polymarket 市场赔率：`get_financial_sentiment`（用于市场门控）
+- 本地账户快照：`data/position/position.jsonl`、`data/balance/balance.jsonl`（用于仓位与风控）
+
+> 说明：当前实现中二阶段仍然会采集 AlphaVantage 与 Polymarket 信息，结果写入
+> `skills/alpaca-live-trading/data/analysis_pipeline_latest.json` 的
+> `alpha_vantage.*` 与 `polymarket_sentiment` 字段。
+
+### 二阶段如何决定“是否交易、怎么交易”
+
+1) Round2 综合评分（仅对第一阶段候选）  
+
+- `fundamental_score`（50%）：ROE、净利率、营收环比、FCF环比
+- `technical_score`（30%）：`recommend_all`
+- `news_score`（20%）：新闻动量（带时效衰减 + 少样本惩罚）
+
+2) Round2 通过规则  
+
+- 优先保留 `score >= 0.4` 的标的
+- 若没有任何标的达标，则回退为 round2 排名前 `top_k`
+
+3) 融合第一阶段信号  
+
+- 最终置信度：`0.7 * stage1_confidence + 0.3 * round2_score`
+- 仅保留在 `round2_pass_symbols` 内的信号
+
+4) 生成交易计划（order_builder）  
+
+- 每笔预算：`min(available_cash * max_position_pct, max_trade_notional)`
+- 买入：`qty = floor(per_trade_budget / price)`
+- 卖出：默认卖当前持仓的一半（至少 1 股）
+
+5) 风控拦截（risk_guard）  
+
+- 拦截条件：`exceed_max_trade_notional` / `exceed_max_position_pct` / `exceed_max_positions`
+
+6) 是否实际下单  
+
+- 仅当命令包含 `--execute-trades` 时才会执行
+- 且需通过市场门控：`market_gate_score >= market_gate_threshold`（默认阈值 `-0.05`）
+- 不满足时会保留分析与计划结果，但不会实际下单
 
 ## 后续可扩展方向
 
