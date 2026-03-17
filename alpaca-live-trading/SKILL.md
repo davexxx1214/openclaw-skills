@@ -7,7 +7,7 @@ AI 实时交易技能 - 使用 Alpaca Paper Trading 进行美股交易决策。
 此技能提供一组独立的 Python 查询脚本，用于获取交易决策所需的各类数据。所有脚本可独立运行，不依赖任何 MCP 服务或项目主服务。
 
 交易决策与执行所需数据：
-1. **获取股价数据** - 通过 TradingView tvscreener 获取 NASDAQ 100 成分股的实时价格
+1. **获取股价数据** - 通过 Alpaca Market Data 获取实时价格，并基于 SQLite 计算技术指标
 2. **获取基本面数据** - 通过 AlphaVantage Fundamentals 获取近一年关键财务
 3. **获取市场新闻** - 通过 AlphaVantage NEWS_SENTIMENT API 获取新闻与情绪分析
 4. **获取市场情绪** - 通过 Polymarket 获取预测市场赔率指标
@@ -19,7 +19,7 @@ AI 实时交易技能 - 使用 Alpaca Paper Trading 进行美股交易决策。
 ### 1. 安装 Python 依赖
 
 ```bash
-pip install requests pyyaml alpaca-py tvscreener
+pip install requests pyyaml alpaca-py
 ```
 
 ### 2. 配置 API Keys
@@ -78,7 +78,7 @@ risk:
    - 基于策略（如 `w_bottom_breakout`）在本地 SQLite 日线数据上做预筛选
 4. 第二阶段（深度分析）：  
    - 对第一阶段候选 + `QQQ` + `SPY` 做深度分析  
-   - 包含：基本面、新闻情绪、Polymarket 赔率、tvscreener 价格与技术面
+   - 包含：基本面、新闻情绪、Polymarket 赔率、Alpaca 行情 + SQLite 技术面
 5. 市场门控：使用 `QQQ/SPY` 与 Polymarket 信号判断是否允许执行交易
 6. 若门控通过则执行交易（可选），并更新 `position.jsonl` + `balance.jsonl`
 
@@ -106,7 +106,7 @@ python ./scripts/run_analysis_trade_pipeline.py \
 - `--benchmark-tickers`：市场门控基准（默认 `QQQ,SPY`）
 - `--market-gate-threshold`：门控阈值，低于阈值则阻止交易执行（默认 `-0.05`）
 - `--skip-default-pool-sync`：跳过分析前默认101池同步（不建议）
-- `--skip-market-snapshot`：跳过 tvscreener 实时快照拉取（会弱化技术面信号）
+- `--skip-market-snapshot`：跳过实时行情快照拉取（会弱化技术面信号）
 
 **执行交易（可选）**
 
@@ -164,7 +164,7 @@ python ./scripts/run_analysis_trade_pipeline.py --execute-trades
 - `position.jsonl`：记录每笔动作及交易后持仓快照（用于策略/回测一致性）
 - `balance.jsonl`：记录交易后账户总览和每只持仓的成本、现价、市值、盈亏（用于资金追踪）
 
-### 1. 查询股价数据 (TradingView tvscreener)
+### 1. 查询股价数据 (Alpaca + SQLite 技术面)
 
 ```bash
 # 查询 NASDAQ 100 + QQQ (共 101 只) 的实时价格
@@ -189,7 +189,7 @@ CTSH, CSGP, KHC, ODFL, DXCM, TTD, ON, BIIB, LULU, CDW, GFS,
 QQQ
 ```
 
-> 注意：该脚本使用 TradingView tvscreener，无需 AlphaVantage 限速配置。
+> 注意：该脚本使用 Alpaca Market Data（`config.yaml` 中 alpaca 凭证），并结合本地 SQLite 日线计算技术指标。
 
 **查询结果会更新到：**
 `./data/stock_prices_latest.json`

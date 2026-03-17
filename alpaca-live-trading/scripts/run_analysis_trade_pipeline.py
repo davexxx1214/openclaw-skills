@@ -6,7 +6,7 @@ Alpaca Live Trading 一体化流程:
    - AlphaVantage 基本面
    - AlphaVantage 新闻与情绪
    - Polymarket 市场赔率
-   - tvscreener 价格与技术面
+   - Alpaca 行情 + SQLite 技术面
 3) 可选执行交易计划
 4) 交易后更新 position.jsonl / balance.jsonl（由 execute_alpaca_trade.py 完成）
 """
@@ -430,7 +430,7 @@ def main() -> None:
     parser.add_argument(
         "--skip-market-snapshot",
         action="store_true",
-        help="跳过 tvscreener 实时快照拉取（将退化为无技术面或缓存）",
+        help="跳过实时行情快照拉取（将退化为缓存或无技术面）",
     )
     args = parser.parse_args()
 
@@ -468,13 +468,15 @@ def main() -> None:
     selected_strategy = str(strategy_config.get("name", "")).strip().lower()
     top_k = int(strategy_config.get("prefilter_top_k") or args.prefilter_top_k or 10)
     top_k = max(top_k, 1)
+    benchmark_tickers = [x.strip().upper() for x in args.benchmark_tickers.split(",") if x.strip()]
+    snapshot_symbols = _dedupe_keep_order(tickers + benchmark_tickers)
 
     print(f"🧠 第一阶段：策略预筛选（strategy={selected_strategy or 'N/A'}，Top{top_k}）...")
     if args.skip_market_snapshot:
-        print("⏭️ 已跳过 tvscreener 实时快照（--skip-market-snapshot）")
+        print("⏭️ 已跳过行情快照拉取（--skip-market-snapshot）")
         snapshot = None
     else:
-        snapshot = _load_market_snapshot()
+        snapshot = _load_market_snapshot(symbols=snapshot_symbols)
     prefilter_quotes: List[Dict[str, Any]] = [get_quote(ticker, snapshot) for ticker in tickers]
     prefilter_context = {
         "universe_tickers": tickers,
@@ -499,7 +501,6 @@ def main() -> None:
     round1_candidates = _dedupe_keep_order([x for x in round1_candidates if x])[:top_k]
     print(f"✅ 第一阶段完成，候选数: {len(round1_candidates)}，候选: {round1_candidates}")
 
-    benchmark_tickers = [x.strip().upper() for x in args.benchmark_tickers.split(",") if x.strip()]
     deep_universe = _dedupe_keep_order(round1_candidates + benchmark_tickers)
     print(f"🔎 第二阶段深度分析标的数: {len(deep_universe)}")
 
@@ -534,8 +535,8 @@ def main() -> None:
     except Exception as e:
         polymarket = f"ERROR: {e}"
 
-    # tvscreener 价格 + 技术面
-    print("📈 第二阶段：tvscreener 价格与技术面...")
+    # 行情价格 + 技术面
+    print("📈 第二阶段：行情价格与技术面...")
     quotes: List[Dict[str, Any]] = []
     for ticker in deep_universe:
         quotes.append(get_quote(ticker, snapshot))
@@ -688,7 +689,12 @@ def main() -> None:
             "news_sentiment_stage2": deep_news,
         },
         "polymarket_sentiment": polymarket,
+        "market_snapshot": {
+            "source": "alpaca+sqlite",
+            "quotes": quotes,
+        },
         "tvscreener": {
+            # 兼容旧字段名，后续可移除
             "quotes": quotes,
         },
         "state_before": {
