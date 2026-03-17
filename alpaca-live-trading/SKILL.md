@@ -68,10 +68,11 @@ risk:
 
 默认流程（独立 Skill，不依赖 MCP）：
 
-1. **先同步默认股票池到 SQLite（必须）**  
-   - 同步目标：默认股票池（NASDAQ 100 + QQQ，共 101 只）  
+1. **先同步默认股票池到 SQLite（默认自动执行）**  
+   - 运行 `run_analysis_trade_pipeline.py` 时会先自动同步默认股票池（NASDAQ 100 + QQQ，共 101 只）  
    - 若本地不存在历史数据：自动全量同步（`outputsize=full`）  
    - 若本地已有历史数据：自动增量同步（`outputsize=compact`，必要时 fallback full）  
+   - 如需跳过可传 `--skip-default-pool-sync`（不建议）  
 2. 读取历史记录：`position.jsonl` + `balance.jsonl`
 3. 第一阶段（101 -> TopK）：  
    - 基于策略（如 `w_bottom_breakout`）在本地 SQLite 日线数据上做预筛选
@@ -82,11 +83,11 @@ risk:
 6. 若门控通过则执行交易（可选），并更新 `position.jsonl` + `balance.jsonl`
 
 ```bash
-# Step 1: 先同步默认股票池到 SQLite（必须先执行）
-python ./scripts/sync_alpha_daily_to_sqlite.py --default-pool --with-audit
-
-# Step 2: 再跑分析（默认股票池）
+# 默认：pipeline 内部会先自动同步 101 股票池，再执行分析
 python ./scripts/run_analysis_trade_pipeline.py
+
+# 可选：手动预同步（用于单独观测同步日志/审计）
+python ./scripts/sync_alpha_daily_to_sqlite.py --default-pool --with-audit
 
 # 指定股票池并输出结果文件
 python ./scripts/run_analysis_trade_pipeline.py \
@@ -104,6 +105,8 @@ python ./scripts/run_analysis_trade_pipeline.py \
 - `--prefilter-top-k`：第一阶段筛选数量（默认 10）
 - `--benchmark-tickers`：市场门控基准（默认 `QQQ,SPY`）
 - `--market-gate-threshold`：门控阈值，低于阈值则阻止交易执行（默认 `-0.05`）
+- `--skip-default-pool-sync`：跳过分析前默认101池同步（不建议）
+- `--skip-market-snapshot`：跳过 tvscreener 实时快照拉取（会弱化技术面信号）
 
 **执行交易（可选）**
 
