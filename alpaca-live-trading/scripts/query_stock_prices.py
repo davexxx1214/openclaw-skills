@@ -77,11 +77,16 @@ def _resolve_technical_stock_fields():
 def _get_snapshot_timeout_seconds() -> float:
     raw = os.getenv("TVSCREENER_SNAPSHOT_TIMEOUT_SECONDS", "").strip()
     if not raw:
-        return 20.0
+        return 50.0
     try:
         return max(float(raw), 1.0)
     except ValueError:
-        return 20.0
+        return 50.0
+
+
+def _is_snapshot_fetch_skipped() -> bool:
+    raw = os.getenv("TVSCREENER_SKIP_SNAPSHOT_FETCH", "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
 
 
 def _load_cached_quotes(max_age_seconds: float = 3600.0) -> Optional[List[Dict[str, Any]]]:
@@ -120,6 +125,10 @@ def _load_market_snapshot(timeout_seconds: Optional[float] = None) -> Any:
     """
     if not TVSCREENER_AVAILABLE:
         return None
+
+    if _is_snapshot_fetch_skipped():
+        print("ℹ️ 已配置跳过 tvscreener 实时快照拉取（TVSCREENER_SKIP_SNAPSHOT_FETCH=1）。")
+        return _load_cached_quotes()
 
     timeout = _get_snapshot_timeout_seconds() if timeout_seconds is None else max(timeout_seconds, 1.0)
     result_holder: Dict[str, Any] = {"snapshot": None, "error": None}
