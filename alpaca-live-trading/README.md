@@ -187,7 +187,7 @@ python scripts/query_prices_sqlite.py --symbol BABA --start-date 2026-02-01 --en
 - pipeline 支持单策略配置（`strategy.name`）并优先读取
 - pipeline 支持两轮筛选：
   - 第一轮：按策略（如 `w_bottom_breakout`）筛出候选（`prefilter_top_k` 是上限，不保底）
-  - 第二轮：对候选 + 基准ETF 做 AlphaVantage 新闻/基本面 + tvscreener + Polymarket 深度分析，并生成交易计划
+  - 第二轮：对候选 + 基准ETF 做 AlphaVantage 新闻/基本面 + Alpaca 行情（结合 SQLite 技术面）+ Polymarket 深度分析，并生成交易计划
 
 待完成（TODO，当前仍未实现）：
 
@@ -223,7 +223,7 @@ python scripts/run_analysis_trade_pipeline.py --execute-trades
 
 - AlphaVantage 新闻情绪：`fetch_news_per_ticker`（每只默认 5 条，可通过 `--news-limit` 调整）
 - AlphaVantage 基本面：`fetch_fundamentals_for_symbol`（`OVERVIEW / INCOME_STATEMENT / BALANCE_SHEET / CASH_FLOW / EARNINGS`）
-- tvscreener 价格与技术面：`get_quote`（当前会用到 `technical.recommend_all` 与价格）
+- Alpaca 行情 + SQLite 技术面：`get_quote`（当前会用到 `technical.recommend_all` 与价格）
 - Polymarket 市场赔率：`get_financial_sentiment`（用于市场门控）
 - 本地账户快照：`data/position/position.jsonl`、`data/balance/balance.jsonl`（用于仓位与风控）
 

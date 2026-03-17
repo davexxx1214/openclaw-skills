@@ -6,7 +6,7 @@ Alpaca Live Trading 一体化流程:
    - AlphaVantage 基本面
    - AlphaVantage 新闻与情绪
    - Polymarket 市场赔率
-   - tvscreener 价格与技术面
+   - Alpaca 行情 + SQLite 技术面
 3) 可选执行交易计划
 4) 交易后更新 position.jsonl / balance.jsonl（由 execute_alpaca_trade.py 完成）
 """
@@ -33,6 +33,8 @@ from query_market_news import fetch_news_per_ticker
 from query_polymarket_sentiment import get_financial_sentiment
 from query_stock_prices import DEFAULT_SYMBOLS, _load_market_snapshot, get_quote
 from risk_guard import apply_risk_guard
+from sync_alpha_daily_to_sqlite import DEFAULT_DB_PATH as DEFAULT_DAILY_DB_PATH
+from sync_alpha_daily_to_sqlite import sync_symbols
 from strategy_engine import run_strategies
 
 
@@ -341,6 +343,30 @@ def _normalize_symbol(symbol: Any) -> str:
     return raw.split(":")[-1] if raw else ""
 
 
+def _run_pre_analysis_daily_sync(
+    *,
+    symbols: List[str],
+    av_calls_per_minute: float,
+    with_audit: bool,
+) -> None:
+    config = load_config()
+    alpha = config.get("alphavantage", {}) if isinstance(config, dict) else {}
+    api_key = str(alpha.get("api_key", "")).strip()
+    if not api_key:
+        raise RuntimeError("缺少 alphavantage.api_key，无法执行分析前日线同步")
+
+    max_calls = max(1, int(av_calls_per_minute))
+    sync_symbols(
+        symbols=symbols,
+        db_path=Path(DEFAULT_DAILY_DB_PATH),
+        api_key=api_key,
+        max_calls_per_minute=max_calls,
+        batch_size=0,
+        with_audit=with_audit,
+        job_name="pipeline_pre_analysis_default_pool_sync",
+    )
+
+
 def main() -> None:
     config = load_config()
     strategy_config = get_strategy_config(config)
@@ -391,6 +417,21 @@ def main() -> None:
         default="skills/alpaca-live-trading/data/analysis_pipeline_latest.json",
         help="输出分析结果 JSON 文件",
     )
+    parser.add_argument(
+        "--skip-default-pool-sync",
+        action="store_true",
+        help="跳过分析前默认101池日线同步（不建议）",
+    )
+    parser.add_argument(
+        "--sync-with-audit",
+        action="store_true",
+        help="分析前同步时写入 sync_audit 审计记录",
+    )
+    parser.add_argument(
+        "--skip-market-snapshot",
+        action="store_true",
+        help="跳过实时行情快照拉取（将退化为缓存或无技术面）",
+    )
     args = parser.parse_args()
 
     tickers = (
@@ -405,6 +446,17 @@ def main() -> None:
     interval = 60.0 / max(args.av_calls_per_minute, 1.0)
     print(f"🚀 启动流程，股票数: {len(tickers)}，AlphaVantage 节流: {interval:.3f}s/次")
 
+    if args.skip_default_pool_sync:
+        print("⏭️ 已跳过分析前默认101池日线同步（--skip-default-pool-sync）")
+    else:
+        print("🗄️ 分析前同步默认101池日线到 SQLite ...")
+        _run_pre_analysis_daily_sync(
+            symbols=DEFAULT_SYMBOLS.copy(),
+            av_calls_per_minute=args.av_calls_per_minute,
+            with_audit=bool(args.sync_with_audit),
+        )
+        print(f"✅ 分析前日线同步完成，DB: {DEFAULT_DAILY_DB_PATH}")
+
     # 0) 读取已有状态
     data_dir = SCRIPT_DIR.parent / "data"
     position_path = data_dir / "position" / "position.jsonl"
@@ -416,9 +468,15 @@ def main() -> None:
     selected_strategy = str(strategy_config.get("name", "")).strip().lower()
     top_k = int(strategy_config.get("prefilter_top_k") or args.prefilter_top_k or 10)
     top_k = max(top_k, 1)
+    benchmark_tickers = [x.strip().upper() for x in args.benchmark_tickers.split(",") if x.strip()]
+    snapshot_symbols = _dedupe_keep_order(tickers + benchmark_tickers)
 
     print(f"🧠 第一阶段：策略预筛选（strategy={selected_strategy or 'N/A'}，Top{top_k}）...")
-    snapshot = _load_market_snapshot()
+    if args.skip_market_snapshot:
+        print("⏭️ 已跳过行情快照拉取（--skip-market-snapshot）")
+        snapshot = None
+    else:
+        snapshot = _load_market_snapshot(symbols=snapshot_symbols)
     prefilter_quotes: List[Dict[str, Any]] = [get_quote(ticker, snapshot) for ticker in tickers]
     prefilter_context = {
         "universe_tickers": tickers,
@@ -443,7 +501,6 @@ def main() -> None:
     round1_candidates = _dedupe_keep_order([x for x in round1_candidates if x])[:top_k]
     print(f"✅ 第一阶段完成，候选数: {len(round1_candidates)}，候选: {round1_candidates}")
 
-    benchmark_tickers = [x.strip().upper() for x in args.benchmark_tickers.split(",") if x.strip()]
     deep_universe = _dedupe_keep_order(round1_candidates + benchmark_tickers)
     print(f"🔎 第二阶段深度分析标的数: {len(deep_universe)}")
 
@@ -478,8 +535,8 @@ def main() -> None:
     except Exception as e:
         polymarket = f"ERROR: {e}"
 
-    # tvscreener 价格 + 技术面
-    print("📈 第二阶段：tvscreener 价格与技术面...")
+    # 行情价格 + 技术面
+    print("📈 第二阶段：行情价格与技术面...")
     quotes: List[Dict[str, Any]] = []
     for ticker in deep_universe:
         quotes.append(get_quote(ticker, snapshot))
@@ -632,7 +689,12 @@ def main() -> None:
             "news_sentiment_stage2": deep_news,
         },
         "polymarket_sentiment": polymarket,
+        "market_snapshot": {
+            "source": "alpaca+sqlite",
+            "quotes": quotes,
+        },
         "tvscreener": {
+            # 兼容旧字段名，后续可移除
             "quotes": quotes,
         },
         "state_before": {
