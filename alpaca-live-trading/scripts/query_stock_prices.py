@@ -9,9 +9,11 @@
 
 import sys
 import json
+import os
+import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 # 将 scripts 目录加入 Python 路径
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -72,25 +74,86 @@ def _resolve_technical_stock_fields():
     return fields, resolved_keys
 
 
-def _load_market_snapshot() -> Any:
+def _get_snapshot_timeout_seconds() -> float:
+    raw = os.getenv("TVSCREENER_SNAPSHOT_TIMEOUT_SECONDS", "").strip()
+    if not raw:
+        return 20.0
+    try:
+        return max(float(raw), 1.0)
+    except ValueError:
+        return 20.0
+
+
+def _load_cached_quotes(max_age_seconds: float = 3600.0) -> Optional[List[Dict[str, Any]]]:
+    """
+    从本地 stock_prices_latest.json 回退读取最近一次可用报价。
+    """
+    cache_path = Path(__file__).resolve().parent.parent / "data" / "stock_prices_latest.json"
+    if not cache_path.exists():
+        return None
+
+    try:
+        age = (datetime.now().timestamp() - cache_path.stat().st_mtime)
+        if age > max_age_seconds:
+            print(
+                f"⚠️ 本地快照已过期（{int(age)}s > {int(max_age_seconds)}s），跳过回退: {cache_path}"
+            )
+            return None
+    except Exception:
+        # 读取文件年龄失败时，继续尝试解析内容
+        pass
+
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        results = payload.get("results", []) if isinstance(payload, dict) else []
+        if isinstance(results, list) and results:
+            print(f"ℹ️ 使用本地缓存报价快照（{len(results)} 条）: {cache_path}")
+            return results
+    except Exception as e:
+        print(f"⚠️ 读取本地快照失败: {e}")
+    return None
+
+
+def _load_market_snapshot(timeout_seconds: Optional[float] = None) -> Any:
     """
     拉取美国市场行情快照，用于本地筛选。
     """
     if not TVSCREENER_AVAILABLE:
         return None
 
-    ss = StockScreener()
-    ss.set_markets(Market.AMERICA)
-    ss.set_range(0, 5000)
-    tech_fields, _ = _resolve_technical_stock_fields()
-    base_fields = [
-        StockField.NAME,
-        StockField.PRICE,
-        StockField.CHANGE_PERCENT,
-        StockField.VOLUME,
-    ]
-    ss.select(*(base_fields + tech_fields))
-    return ss.get()
+    timeout = _get_snapshot_timeout_seconds() if timeout_seconds is None else max(timeout_seconds, 1.0)
+    result_holder: Dict[str, Any] = {"snapshot": None, "error": None}
+
+    def _fetch_snapshot() -> None:
+        try:
+            ss = StockScreener()
+            ss.set_markets(Market.AMERICA)
+            ss.set_range(0, 5000)
+            tech_fields, _ = _resolve_technical_stock_fields()
+            base_fields = [
+                StockField.NAME,
+                StockField.PRICE,
+                StockField.CHANGE_PERCENT,
+                StockField.VOLUME,
+            ]
+            ss.select(*(base_fields + tech_fields))
+            result_holder["snapshot"] = ss.get()
+        except Exception as e:
+            result_holder["error"] = e
+
+    thread = threading.Thread(target=_fetch_snapshot, name="tvscreener-snapshot-loader", daemon=True)
+    thread.start()
+    thread.join(timeout=timeout)
+
+    if thread.is_alive():
+        print(f"⚠️ tvscreener 快照拉取超时（>{timeout:.1f}s），回退本地缓存。")
+        return _load_cached_quotes()
+
+    if result_holder["error"] is not None:
+        print(f"⚠️ tvscreener 快照拉取失败: {result_holder['error']}，回退本地缓存。")
+        return _load_cached_quotes()
+
+    return result_holder["snapshot"]
 
 
 def get_quote(symbol: str, snapshot) -> Dict[str, Any]:
@@ -108,6 +171,17 @@ def get_quote(symbol: str, snapshot) -> Dict[str, Any]:
         return {"error": "tvscreener 未就绪"}
 
     token = symbol.split(":")[-1].upper()
+
+    # 回退模式：snapshot 为本地缓存报价列表（write_latest_snapshot 的结果）
+    if isinstance(snapshot, list):
+        for item in snapshot:
+            if not isinstance(item, dict):
+                continue
+            row_symbol = str(item.get("symbol", "")).upper().split(":")[-1]
+            if row_symbol == token:
+                return item
+        return {"error": "无数据"}
+
     symbol_col = "Symbol" if "Symbol" in snapshot.columns else None
     row = snapshot[snapshot[symbol_col] == symbol] if symbol_col else snapshot.iloc[0:0]
     if row.empty and symbol_col:
