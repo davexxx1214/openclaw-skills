@@ -86,6 +86,9 @@ risk:
 # 默认：pipeline 内部会先自动同步 101 股票池，再执行分析
 python ./scripts/run_analysis_trade_pipeline.py
 
+# 定时/后台跑时建议无缓冲，避免日志文件长时间为空
+PYTHONUNBUFFERED=1 python ./scripts/run_analysis_trade_pipeline.py
+
 # 可选：手动预同步（用于单独观测同步日志/审计）
 python ./scripts/sync_alpha_daily_to_sqlite.py --default-pool --with-audit
 
@@ -107,6 +110,25 @@ python ./scripts/run_analysis_trade_pipeline.py \
 - `--market-gate-threshold`：门控阈值，低于阈值则阻止交易执行（默认 `-0.05`）
 - `--skip-default-pool-sync`：跳过分析前默认101池同步（不建议）
 - `--skip-market-snapshot`：跳过实时行情快照拉取（会弱化技术面信号）
+
+## 定时任务与日志（后台运行推荐）
+
+Agent、cron 或 `nohup` 把 pipeline 放到后台并重定向到文件时，常出现「进程在跑、但日志一会儿还是空的」。多数情况是 **Python 标准输出默认缓冲**，不会立刻写入日志文件，不代表脚本已卡死。
+
+建议：
+
+1. **无缓冲运行（任选其一）**  
+   - `PYTHONUNBUFFERED=1 python ./scripts/run_analysis_trade_pipeline.py ...`  
+   - 或 `python -u ./scripts/run_analysis_trade_pipeline.py ...`  
+   单独跑同步脚本时同样适用。
+
+2. **分日志更易排查卡点**  
+   - 日线同步：`logs/sync_YYYYMMDD.log`（单独执行 `sync_alpha_daily_to_sqlite.py` 时）  
+   - 分析流水线：`logs/pipeline_YYYYMMDD_HHMM.log`  
+   重定向示例：`PYTHONUNBUFFERED=1 python ./scripts/run_analysis_trade_pipeline.py ... > ./logs/pipeline.log 2>&1`
+
+3. **长时间无输出时**  
+   前几步可能是 SQLite 批量同步、实时行情快照或 AlphaVantage 网络 I/O，属正常现象；开启无缓冲后日志会按阶段陆续出现，便于调度 Agent 判断进度。
 
 **执行交易（可选）**
 
