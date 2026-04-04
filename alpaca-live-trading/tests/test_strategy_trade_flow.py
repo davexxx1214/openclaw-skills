@@ -95,6 +95,109 @@ class StrategyEngineTests(unittest.TestCase):
             self.assertGreaterEqual(len(result["signals_all"]), 1)
             self.assertEqual(result["signals_all"][0]["strategy"], "w_bottom_breakout")
 
+    def test_run_autoresearch_trend_from_sqlite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "stock_daily.sqlite"
+            conn = sqlite3.connect(str(db_path))
+            conn.execute(
+                """
+                CREATE TABLE stock_daily (
+                    symbol TEXT NOT NULL,
+                    trade_date TEXT NOT NULL,
+                    open REAL NOT NULL,
+                    high REAL NOT NULL,
+                    low REAL NOT NULL,
+                    close REAL NOT NULL,
+                    volume INTEGER NOT NULL,
+                    PRIMARY KEY(symbol, trade_date)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE fundamentals_quarterly (
+                    symbol TEXT NOT NULL,
+                    fiscal_date_ending TEXT NOT NULL,
+                    revenue REAL,
+                    free_cashflow REAL,
+                    total_shareholder_equity REAL,
+                    long_term_debt REAL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE fundamentals_overview_daily (
+                    symbol TEXT NOT NULL,
+                    as_of_date TEXT NOT NULL,
+                    pe_ratio REAL,
+                    beta REAL,
+                    profit_margin REAL,
+                    roe_ttm REAL,
+                    roa_ttm REAL
+                )
+                """
+            )
+
+            prices = [100.0 + i * 0.35 for i in range(210)]
+            prices[-1] = prices[-2] * 1.015
+            for i, close in enumerate(prices):
+                volume = 1_000_000 if i < len(prices) - 1 else 1_700_000
+                conn.execute(
+                    """
+                    INSERT INTO stock_daily(symbol, trade_date, open, high, low, close, volume)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "TEST",
+                        f"2025-01-01-{i:03d}",
+                        close * 0.99,
+                        close * 1.01,
+                        close * 0.98,
+                        close,
+                        volume,
+                    ),
+                )
+
+            quarterly_rows = [
+                ("2025-12-31", 2200.0, 360.0, 1700.0, 120.0),
+                ("2025-09-30", 2050.0, 320.0, 1660.0, 125.0),
+                ("2025-06-30", 1900.0, 300.0, 1600.0, 130.0),
+                ("2025-03-31", 1800.0, 280.0, 1550.0, 132.0),
+                ("2024-12-31", 1600.0, 220.0, 1500.0, 140.0),
+            ]
+            for fiscal_date, revenue, fcf, equity, debt in quarterly_rows:
+                conn.execute(
+                    """
+                    INSERT INTO fundamentals_quarterly(symbol, fiscal_date_ending, revenue, free_cashflow, total_shareholder_equity, long_term_debt)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    ("TEST", fiscal_date, revenue, fcf, equity, debt),
+                )
+
+            conn.execute(
+                """
+                INSERT INTO fundamentals_overview_daily(symbol, as_of_date, pe_ratio, beta, profit_margin, roe_ttm, roa_ttm)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("TEST", "2026-03-31", 22.0, 1.05, 0.20, 0.28, 0.14),
+            )
+            conn.commit()
+            conn.close()
+
+            context = {
+                "universe_tickers": ["TEST"],
+                "history_db_path": str(db_path),
+                "strategy_prefilter_top_k": 10,
+                "quotes": [{"symbol": "TEST", "price": prices[-1], "technical": {"recommend_all": 0.4}}],
+                "positions_snapshot": [],
+            }
+            result = run_strategies(["autoresearch_trend"], context, min_confidence=0.0)
+            self.assertIn("signals_all", result)
+            self.assertGreaterEqual(len(result["signals_all"]), 1)
+            self.assertEqual(result["signals_all"][0]["strategy"], "autoresearch_trend")
+            self.assertEqual(result["signals_all"][0]["action"], "buy")
+
 
 class OrderAndRiskTests(unittest.TestCase):
     def test_build_trade_plan_and_risk_guard(self):

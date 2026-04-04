@@ -75,6 +75,16 @@ def _extract_recommend_all(quote: Optional[Dict[str, Any]]) -> Optional[float]:
     return _to_float(technical.get("recommend_all"))
 
 
+def _extract_positions_map(positions: List[Dict[str, Any]]) -> Dict[str, float]:
+    out: Dict[str, float] = {}
+    for position in positions or []:
+        symbol = _normalize_symbol(position.get("symbol"))
+        qty = _to_float(position.get("qty")) or 0.0
+        if symbol and qty > 0:
+            out[symbol] = qty
+    return out
+
+
 def _load_daily_bars_from_sqlite(db_path: Path, symbol: str, limit: int = 420) -> List[Dict[str, float]]:
     if not db_path.exists():
         return []
@@ -106,6 +116,67 @@ def _load_daily_bars_from_sqlite(db_path: Path, symbol: str, limit: int = 420) -
             }
         )
     return bars
+
+
+def _load_overview_from_sqlite(db_path: Path, symbol: str) -> Dict[str, Any]:
+    if not db_path.exists():
+        return {}
+    query = """
+    SELECT pe_ratio, beta, profit_margin, roe_ttm, roa_ttm
+    FROM fundamentals_overview_daily
+    WHERE symbol = ?
+    ORDER BY as_of_date DESC
+    LIMIT 1
+    """
+    conn = sqlite3.connect(str(db_path))
+    try:
+        row = conn.execute(query, (symbol,)).fetchone()
+    except sqlite3.Error:
+        row = None
+    finally:
+        conn.close()
+
+    if not row:
+        return {}
+    return {
+        "pe_ratio": _to_float(row[0]),
+        "beta": _to_float(row[1]),
+        "profit_margin": _to_float(row[2]),
+        "roe_ttm": _to_float(row[3]),
+        "roa_ttm": _to_float(row[4]),
+    }
+
+
+def _load_quarterly_from_sqlite(db_path: Path, symbol: str, limit: int = 8) -> List[Dict[str, Any]]:
+    if not db_path.exists():
+        return []
+    query = """
+    SELECT fiscal_date_ending, revenue, free_cashflow, total_shareholder_equity, long_term_debt
+    FROM fundamentals_quarterly
+    WHERE symbol = ?
+    ORDER BY fiscal_date_ending DESC
+    LIMIT ?
+    """
+    conn = sqlite3.connect(str(db_path))
+    try:
+        rows = conn.execute(query, (symbol, limit)).fetchall()
+    except sqlite3.Error:
+        rows = []
+    finally:
+        conn.close()
+
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        out.append(
+            {
+                "fiscal_date_ending": row[0],
+                "revenue": _to_float(row[1]),
+                "free_cashflow": _to_float(row[2]),
+                "total_shareholder_equity": _to_float(row[3]),
+                "long_term_debt": _to_float(row[4]),
+            }
+        )
+    return out
 
 
 def _simple_local_lows(closes: List[float], window: int = 3) -> List[int]:
@@ -141,6 +212,88 @@ def _compute_return(closes: List[float], days: int) -> Optional[float]:
     if len(closes) <= days or closes[-days - 1] <= 0:
         return None
     return closes[-1] / closes[-days - 1] - 1.0
+
+
+def _simple_moving_average(values: List[float], period: int) -> Optional[float]:
+    if len(values) < period:
+        return None
+    window = values[-period:]
+    return sum(window) / float(period)
+
+
+def _ema_series(values: List[float], period: int) -> List[float]:
+    if not values:
+        return []
+    alpha = 2.0 / (period + 1.0)
+    ema = values[0]
+    out = [ema]
+    for value in values[1:]:
+        ema = alpha * value + (1.0 - alpha) * ema
+        out.append(ema)
+    return out
+
+
+def _macd_histogram(closes: List[float]) -> Optional[float]:
+    if len(closes) < 35:
+        return None
+    ema_fast = _ema_series(closes, 12)
+    ema_slow = _ema_series(closes, 26)
+    macd_series = [fast - slow for fast, slow in zip(ema_fast, ema_slow)]
+    signal_series = _ema_series(macd_series, 9)
+    if not signal_series:
+        return None
+    return macd_series[-1] - signal_series[-1]
+
+
+def _volume_ratio(volumes: List[float], period: int = 20) -> Optional[float]:
+    if len(volumes) < period:
+        return None
+    avg_volume = sum(volumes[-period:]) / float(period)
+    if avg_volume <= 0:
+        return None
+    return volumes[-1] / avg_volume
+
+
+def _compute_quality_score(overview: Dict[str, Any], quarterly_rows: List[Dict[str, Any]]) -> tuple[float, Dict[str, float]]:
+    latest = quarterly_rows[0] if quarterly_rows else {}
+    yoy = quarterly_rows[4] if len(quarterly_rows) >= 5 else {}
+
+    latest_revenue = _to_float(latest.get("revenue")) or 0.0
+    yoy_revenue = _to_float(yoy.get("revenue")) or 0.0
+    latest_fcf = _to_float(latest.get("free_cashflow")) or 0.0
+    latest_equity = _to_float(latest.get("total_shareholder_equity")) or 0.0
+    latest_debt = _to_float(latest.get("long_term_debt")) or 0.0
+
+    revenue_growth = (latest_revenue / yoy_revenue - 1.0) if yoy_revenue > 0 else 0.0
+    fcf_margin = (latest_fcf / latest_revenue) if latest_revenue > 0 else 0.0
+    debt_to_equity = (latest_debt / latest_equity) if latest_equity > 0 else 0.0
+
+    pe_ratio = _to_float(overview.get("pe_ratio")) or 0.0
+    beta = _to_float(overview.get("beta")) or 0.0
+    roe = _to_float(overview.get("roe_ttm")) or 0.0
+    roa = _to_float(overview.get("roa_ttm")) or 0.0
+    profit_margin = _to_float(overview.get("profit_margin")) or 0.0
+
+    quality_score = (
+        0.25 * math.tanh(revenue_growth / 0.20)
+        + 0.20 * math.tanh(fcf_margin / 0.12)
+        + 0.20 * math.tanh(roe / 0.25)
+        + 0.10 * math.tanh(roa / 0.12)
+        + 0.10 * math.tanh(profit_margin / 0.15)
+        - 0.10 * math.tanh(max(beta - 1.3, 0.0) / 0.7)
+        - 0.15 * math.tanh(max(debt_to_equity, 0.0) / 1.0)
+        - 0.10 * math.tanh(max(pe_ratio - 25.0, 0.0) / 20.0)
+    )
+    return quality_score, {
+        "revenue_growth_yoy": revenue_growth,
+        "fcf_margin": fcf_margin,
+        "debt_to_equity": debt_to_equity,
+        "pe_ratio": pe_ratio,
+        "beta": beta,
+        "roe_ttm": roe,
+        "roa_ttm": roa,
+        "profit_margin": profit_margin,
+    }
 
 
 def _rank_to_percentile_desc(values: Dict[str, Optional[float]]) -> Dict[str, float]:
@@ -232,6 +385,137 @@ def _score_w_bottom_candidate(
     state_bonus = 0.1 if candidate.get("breakout_state") == "breakout" else 0.05
 
     return 0.3 * vol_score + 0.25 * span_score + 0.25 * upside_score + 0.2 * rps_score + state_bonus
+
+
+def _run_autoresearch_trend(context: Dict[str, Any]) -> List[StrategySignal]:
+    tickers = context.get("universe_tickers") or context.get("selected_top_tickers") or []
+    symbols = [_normalize_symbol(x) for x in tickers if _normalize_symbol(x)]
+    if not symbols:
+        return []
+
+    db_path_raw = context.get("history_db_path")
+    db_path = Path(str(db_path_raw)).resolve() if db_path_raw else DEFAULT_DAILY_DB_PATH
+    lookback = int((_to_float(context.get("history_lookback_days")) or 420))
+    top_k = int((_to_float(context.get("strategy_prefilter_top_k")) or 10))
+    top_k = max(top_k, 1)
+
+    quote_map = _build_quote_map(context.get("quotes", []) or [])
+    positions_map = _extract_positions_map(context.get("positions_snapshot", []) or [])
+
+    buy_signals: List[StrategySignal] = []
+    sell_signals: List[StrategySignal] = []
+
+    for symbol in symbols:
+        bars = _load_daily_bars_from_sqlite(db_path, symbol, limit=lookback)
+        if len(bars) < 160:
+            continue
+
+        closes = [bar["close"] for bar in bars]
+        volumes = [bar["volume"] for bar in bars]
+        quote = quote_map.get(symbol, {})
+        live_price = _extract_price(quote)
+        if live_price is not None and live_price > 0:
+            closes[-1] = float(live_price)
+
+        sma30 = _simple_moving_average(closes, 30)
+        sma150 = _simple_moving_average(closes, 150)
+        ret20 = _compute_return(closes, 20)
+        ret60 = _compute_return(closes, 60)
+        vol_ratio20 = _volume_ratio(volumes, 20)
+        macd_hist = _macd_histogram(closes)
+        price = closes[-1]
+
+        if None in {sma30, sma150, ret20, ret60, vol_ratio20, macd_hist}:
+            continue
+
+        overview = _load_overview_from_sqlite(db_path, symbol)
+        quarterly_rows = _load_quarterly_from_sqlite(db_path, symbol, limit=8)
+        quality_score, quality_meta = _compute_quality_score(overview, quarterly_rows)
+
+        buy_condition = (
+            price > sma30
+            and sma30 > sma150
+            and ret20 > 0.0
+            and ret60 > 0.06
+            and vol_ratio20 > 1.2
+            and quality_score > 0.0
+            and macd_hist > -0.10
+        )
+        sell_condition = (
+            symbol in positions_map
+            and (
+                price < sma30
+                or ret20 < -0.04
+                or macd_hist < -0.15
+            )
+        )
+
+        buy_score = (
+            2.0 * ret60
+            + 1.0 * ret20
+            + 0.30 * (vol_ratio20 - 1.0)
+            + 0.50 * quality_score
+            + 0.20 * max(macd_hist, -0.10)
+        )
+        exit_score = max(
+            ((sma30 - price) / sma30) if sma30 and price < sma30 else 0.0,
+            -ret20 if ret20 < 0 else 0.0,
+            (-macd_hist / 0.20) if macd_hist < 0 else 0.0,
+        )
+
+        metadata = {
+            "price": round(price, 4),
+            "sma30": round(sma30, 4),
+            "sma150": round(sma150, 4),
+            "ret20": round(ret20, 6),
+            "ret60": round(ret60, 6),
+            "vol_ratio20": round(vol_ratio20, 6),
+            "macd_hist": round(macd_hist, 6),
+            "quality_score": round(quality_score, 6),
+            "research_profile": "trend_30_150_hold10",
+            "live_note": "entry logic mirrors autoresearch; min_hold_days is not enforced in live exit logic",
+        }
+        metadata.update({key: round(value, 6) for key, value in quality_meta.items()})
+
+        if sell_condition:
+            sell_confidence = _clamp(0.55 + 0.35 * exit_score, 0.0, 0.95)
+            sell_signals.append(
+                StrategySignal(
+                    strategy="autoresearch_trend",
+                    symbol=symbol,
+                    action="sell",
+                    confidence=sell_confidence,
+                    reason=(
+                        f"trend exit: close={price:.2f}, sma30={sma30:.2f}, "
+                        f"ret20={ret20:.3f}, macd_hist={macd_hist:.3f}"
+                    ),
+                    score=exit_score,
+                    price=price,
+                    metadata=metadata,
+                )
+            )
+
+        if buy_condition:
+            buy_confidence = _clamp(0.55 + 0.35 * buy_score, 0.0, 0.95)
+            buy_signals.append(
+                StrategySignal(
+                    strategy="autoresearch_trend",
+                    symbol=symbol,
+                    action="buy",
+                    confidence=buy_confidence,
+                    reason=(
+                        f"trend confirmed: sma30>{sma30:.2f}, sma150={sma150:.2f}, "
+                        f"ret60={ret60:.3f}, quality={quality_score:.3f}"
+                    ),
+                    score=buy_score,
+                    price=price,
+                    metadata=metadata,
+                )
+            )
+
+    sell_signals.sort(key=lambda item: item.score, reverse=True)
+    buy_signals.sort(key=lambda item: item.score, reverse=True)
+    return sell_signals + buy_signals[:top_k]
 
 
 def _run_w_bottom_breakout(context: Dict[str, Any]) -> List[StrategySignal]:
@@ -414,6 +698,7 @@ def _run_market_gate_trend(context: Dict[str, Any]) -> List[StrategySignal]:
 
 
 _STRATEGY_HANDLERS = {
+    "autoresearch_trend": _run_autoresearch_trend,
     "news_momentum": _run_news_momentum,
     "market_gate_trend": _run_market_gate_trend,
     "w_bottom_breakout": _run_w_bottom_breakout,

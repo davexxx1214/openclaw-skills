@@ -22,6 +22,8 @@ strategy:
   enabled: true
   # 单策略模式：优先读取 name
   name: w_bottom_breakout
+  # To use the trend strategy validated in the autoresearch repo, switch to:
+  # name: autoresearch_trend
   # 兼容旧版多策略（未设置 name 时使用 names[0]）
   names:
     - news_momentum

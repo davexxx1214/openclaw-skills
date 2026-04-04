@@ -463,6 +463,8 @@ def main() -> None:
     balance_path = data_dir / "balance" / "balance.jsonl"
     old_positions = _read_jsonl(position_path)
     old_balances = _read_jsonl(balance_path)
+    latest_positions_snapshot = _extract_latest_positions_snapshot(old_balances)
+    latest_account_snapshot = _extract_latest_account_snapshot(old_balances)
 
     # 第一阶段：基于策略进行预筛选（默认 w_bottom_breakout）
     selected_strategy = str(strategy_config.get("name", "")).strip().lower()
@@ -484,6 +486,7 @@ def main() -> None:
         "history_db_path": str(SCRIPT_DIR.parent / "data" / "stock_daily.sqlite"),
         "history_lookback_days": 420,
         "strategy_prefilter_top_k": top_k,
+        "positions_snapshot": latest_positions_snapshot,
     }
     round1_decisions: Dict[str, Any] = {}
     round1_candidates_signals: List[Dict[str, Any]] = []
@@ -564,8 +567,8 @@ def main() -> None:
     strategy_decisions: Dict[str, Any] = {}
     generated_trade_plan: List[Dict[str, Any]] = []
     risk_rejections: List[Dict[str, Any]] = []
-    account_snapshot = _extract_latest_account_snapshot(old_balances)
-    positions_snapshot = _extract_latest_positions_snapshot(old_balances)
+    account_snapshot = latest_account_snapshot
+    positions_snapshot = latest_positions_snapshot
 
     if strategy_config.get("enabled"):
         strategy_decisions = dict(round1_decisions or {})

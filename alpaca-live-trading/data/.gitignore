@@ -1,1 +1,2 @@
 *.sqlite
+/stock_daily.sqlite
