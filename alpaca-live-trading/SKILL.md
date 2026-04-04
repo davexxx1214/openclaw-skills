@@ -190,10 +190,16 @@ python ./scripts/run_analysis_trade_pipeline.py --execute-trades
 
 每次执行交易（buy/sell）时，必须遵循以下流程：
 
-1. 下单（Alpaca）
-2. 订单成交后，重新查询 Alpaca 账户真实状态（账户概览 + 全部持仓）
-3. 读取并更新 `position.jsonl`
-4. 读取并更新 `balance.jsonl`
+1. 如果这是账户的**第一次交易**，且本地 `position.jsonl` / `balance.jsonl` 还不存在：
+   - agent 必须先记录当时的 `QQQ` 和 `SPY` 价格，作为账户启动 benchmark
+   - 该 benchmark 主要用于未来与账户净值、策略收益做对比
+   - 建议至少记录：`timestamp_et`、`timestamp_utc`、`QQQ price`、`SPY price`、数据来源
+   - 推荐先执行：`python ./scripts/query_stock_prices.py QQQ SPY`
+   - 这条目前是 **agent 操作要求**，不是现有交易脚本自动写入的字段
+2. 下单（Alpaca）
+3. 订单成交后，重新查询 Alpaca 账户真实状态（账户概览 + 全部持仓）
+4. 读取并更新 `position.jsonl`
+5. 读取并更新 `balance.jsonl`
 
 其中：
 - `position.jsonl`：记录每笔动作及交易后持仓快照（用于策略/回测一致性）
@@ -381,7 +387,12 @@ python ./scripts/query_alpaca_account.py --json
 
 ### 5. 执行交易并同步 `position.jsonl` / `balance.jsonl`
 
+> 首次交易特别要求：如果本地 `position.jsonl` 与 `balance.jsonl` 还未建立，agent 应先抓取并记录 `QQQ` / `SPY` 当时价格，作为账户启动 benchmark，再进行第一笔交易。
+
 ```bash
+# 首次交易前，先记录 benchmark
+python ./scripts/query_stock_prices.py QQQ SPY
+
 # 买入
 python ./scripts/execute_alpaca_trade.py --action buy --symbol AAPL --qty 1
 
