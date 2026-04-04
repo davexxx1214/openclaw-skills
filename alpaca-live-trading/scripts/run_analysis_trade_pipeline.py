@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sqlite3
 import subprocess
 import sys
 from datetime import datetime
@@ -28,6 +29,12 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 from _config import get_risk_config, get_strategy_config, load_config
 from order_builder import build_trade_plan
+from query_alpaca_account import (
+    get_account_info,
+    get_alpaca_client,
+    get_positions,
+    persist_account_snapshot,
+)
 from query_fundamentals import fetch_fundamentals_for_symbol
 from query_market_news import fetch_news_per_ticker
 from query_polymarket_sentiment import get_financial_sentiment
@@ -35,6 +42,7 @@ from query_stock_prices import DEFAULT_SYMBOLS, _load_market_snapshot, get_quote
 from risk_guard import apply_risk_guard
 from sync_alpha_daily_to_sqlite import DEFAULT_DB_PATH as DEFAULT_DAILY_DB_PATH
 from sync_alpha_daily_to_sqlite import sync_symbols
+from sync_alpha_fundamentals_to_sqlite import run_batch as sync_fundamentals_batch
 from strategy_engine import run_strategies
 
 
@@ -367,6 +375,121 @@ def _run_pre_analysis_daily_sync(
     )
 
 
+def _select_fundamentals_sync_symbols(
+    *,
+    db_path: Path,
+    symbols: List[str],
+    stale_after_days: int = 7,
+    min_quarterly_rows: int = 5,
+) -> List[str]:
+    candidates = _dedupe_keep_order([_normalize_symbol(s) for s in symbols if _normalize_symbol(s)])
+    if not candidates or not db_path.exists():
+        return candidates
+
+    stale_after_days = max(0, int(stale_after_days))
+    min_quarterly_rows = max(1, int(min_quarterly_rows))
+    today = datetime.now().date()
+    stale_symbols: List[str] = []
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        for symbol in candidates:
+            overview_row = conn.execute(
+                """
+                SELECT as_of_date
+                FROM fundamentals_overview_daily
+                WHERE symbol = ?
+                ORDER BY as_of_date DESC
+                LIMIT 1
+                """,
+                (symbol,),
+            ).fetchone()
+            quarterly_row = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM fundamentals_quarterly
+                WHERE symbol = ?
+                """,
+                (symbol,),
+            ).fetchone()
+
+            overview_date_text = str(overview_row[0]) if overview_row and overview_row[0] else ""
+            try:
+                overview_date = datetime.strptime(overview_date_text, "%Y-%m-%d").date()
+            except ValueError:
+                overview_date = None
+            quarterly_count = int(quarterly_row[0]) if quarterly_row and quarterly_row[0] is not None else 0
+
+            is_overview_stale = (
+                overview_date is None or (today - overview_date).days >= stale_after_days
+            )
+            if stale_after_days <= 0 and overview_date is not None:
+                is_overview_stale = overview_date < today
+            needs_quarterly = quarterly_count < min_quarterly_rows
+            if is_overview_stale or needs_quarterly:
+                stale_symbols.append(symbol)
+    finally:
+        conn.close()
+
+    return stale_symbols
+
+
+def _run_pre_analysis_fundamentals_sync(
+    *,
+    symbols: List[str],
+    av_calls_per_minute: float,
+    with_audit: bool,
+    stale_after_days: int,
+) -> List[str]:
+    config = load_config()
+    alpha = config.get("alphavantage", {}) if isinstance(config, dict) else {}
+    api_key = str(alpha.get("api_key", "")).strip()
+    if not api_key:
+        raise RuntimeError("缂哄皯 alphavantage.api_key锛屾棤娉曟墽琛屽垎鏋愬墠 fundamentals 鍚屾")
+
+    db_path = Path(DEFAULT_DAILY_DB_PATH)
+    stale_symbols = _select_fundamentals_sync_symbols(
+        db_path=db_path,
+        symbols=symbols,
+        stale_after_days=stale_after_days,
+        min_quarterly_rows=5,
+    )
+    if not stale_symbols:
+        return []
+
+    sync_fundamentals_batch(
+        symbols=stale_symbols,
+        db_path=db_path,
+        api_key=api_key,
+        max_calls_per_minute=max(1, int(av_calls_per_minute)),
+        years=5,
+        batch_size=0,
+        with_audit=with_audit,
+        job_name="pipeline_pre_analysis_fundamentals_sync",
+    )
+    return stale_symbols
+
+
+def _refresh_pre_analysis_account_snapshot() -> Dict[str, Any]:
+    client = get_alpaca_client()
+    if not client:
+        raise RuntimeError("Alpaca client unavailable")
+
+    account = get_account_info(client)
+    positions = get_positions(client)
+    records = persist_account_snapshot(
+        account,
+        positions,
+        source="run_analysis_trade_pipeline",
+        action="pre_analysis_account_snapshot",
+    )
+    return {
+        "account": account,
+        "positions": positions,
+        "records": records,
+    }
+
+
 def main() -> None:
     config = load_config()
     strategy_config = get_strategy_config(config)
@@ -432,6 +555,22 @@ def main() -> None:
         action="store_true",
         help="跳过实时行情快照拉取（将退化为缓存或无技术面）",
     )
+    parser.add_argument(
+        "--skip-fundamentals-sync",
+        action="store_true",
+        help="skip SQLite fundamentals refresh before analysis",
+    )
+    parser.add_argument(
+        "--fundamentals-stale-days",
+        type=int,
+        default=7,
+        help="refresh fundamentals if overview snapshot is at least this many days old",
+    )
+    parser.add_argument(
+        "--skip-account-refresh",
+        action="store_true",
+        help="skip Alpaca account and positions snapshot refresh before analysis",
+    )
     args = parser.parse_args()
 
     tickers = (
@@ -439,6 +578,14 @@ def main() -> None:
         if args.tickers
         else DEFAULT_SYMBOLS.copy()
     )
+    benchmark_tickers = [x.strip().upper() for x in args.benchmark_tickers.split(",") if x.strip()]
+    history_sync_symbols = _dedupe_keep_order(DEFAULT_SYMBOLS.copy() + tickers + benchmark_tickers)
+    fundamentals_sync_symbols = _dedupe_keep_order(tickers)
+    pre_run_sync: Dict[str, Any] = {
+        "daily_prices": {"status": "skipped", "symbols": []},
+        "fundamentals": {"status": "skipped", "symbols": []},
+        "account_snapshot": {"status": "skipped"},
+    }
     if not tickers:
         print("❌ 股票列表为空")
         raise SystemExit(1)
@@ -447,15 +594,53 @@ def main() -> None:
     print(f"🚀 启动流程，股票数: {len(tickers)}，AlphaVantage 节流: {interval:.3f}s/次")
 
     if args.skip_default_pool_sync:
-        print("⏭️ 已跳过分析前默认101池日线同步（--skip-default-pool-sync）")
+        pre_run_sync["daily_prices"] = {"status": "skipped", "symbols": history_sync_symbols}
+        print("⏭️ 已跳过分析前默认股票池日线同步（--skip-default-pool-sync）")
     else:
-        print("🗄️ 分析前同步默认101池日线到 SQLite ...")
+        print("🗂️ 分析前同步股票日线到 SQLite ...")
         _run_pre_analysis_daily_sync(
-            symbols=DEFAULT_SYMBOLS.copy(),
+            symbols=history_sync_symbols,
             av_calls_per_minute=args.av_calls_per_minute,
             with_audit=bool(args.sync_with_audit),
         )
         print(f"✅ 分析前日线同步完成，DB: {DEFAULT_DAILY_DB_PATH}")
+        pre_run_sync["daily_prices"] = {"status": "ok", "symbols": history_sync_symbols}
+
+    if args.skip_fundamentals_sync:
+        print("⏭️ 已跳过分析前 SQLite fundamentals 同步（--skip-fundamentals-sync）")
+        pre_run_sync["fundamentals"] = {"status": "skipped", "symbols": fundamentals_sync_symbols}
+    else:
+        print("🧾 分析前检查并刷新 SQLite fundamentals ...")
+        stale_symbols = _run_pre_analysis_fundamentals_sync(
+            symbols=fundamentals_sync_symbols,
+            av_calls_per_minute=args.av_calls_per_minute,
+            with_audit=bool(args.sync_with_audit),
+            stale_after_days=args.fundamentals_stale_days,
+        )
+        if stale_symbols:
+            print(f"✅ fundamentals 同步完成，symbols={stale_symbols}")
+            pre_run_sync["fundamentals"] = {"status": "ok", "symbols": stale_symbols}
+        else:
+            print("✅ SQLite fundamentals 已足够新，无需同步")
+            pre_run_sync["fundamentals"] = {"status": "already_fresh", "symbols": []}
+
+    if args.skip_account_refresh:
+        print("⏭️ 已跳过分析前账户/持仓快照刷新（--skip-account-refresh）")
+        pre_run_sync["account_snapshot"] = {"status": "skipped"}
+    else:
+        print("🏦 分析前刷新 Alpaca 账户与持仓快照 ...")
+        try:
+            snapshot_refresh = _refresh_pre_analysis_account_snapshot()
+            positions_count = len(snapshot_refresh.get("positions") or [])
+            print(f"✅ 账户快照已刷新，持仓数={positions_count}")
+            pre_run_sync["account_snapshot"] = {
+                "status": "ok",
+                "positions_count": positions_count,
+                "records": snapshot_refresh.get("records", {}),
+            }
+        except Exception as exc:
+            print(f"⚠️ 账户快照刷新失败，回退到本地 JSONL: {exc}")
+            pre_run_sync["account_snapshot"] = {"status": "fallback_local", "error": str(exc)}
 
     # 0) 读取已有状态
     data_dir = SCRIPT_DIR.parent / "data"
@@ -470,7 +655,6 @@ def main() -> None:
     selected_strategy = str(strategy_config.get("name", "")).strip().lower()
     top_k = int(strategy_config.get("prefilter_top_k") or args.prefilter_top_k or 10)
     top_k = max(top_k, 1)
-    benchmark_tickers = [x.strip().upper() for x in args.benchmark_tickers.split(",") if x.strip()]
     snapshot_symbols = _dedupe_keep_order(tickers + benchmark_tickers)
 
     print(f"🧠 第一阶段：策略预筛选（strategy={selected_strategy or 'N/A'}，Top{top_k}）...")
@@ -663,6 +847,7 @@ def main() -> None:
         "tickers_count": len(tickers),
         "tickers": tickers,
         "pipeline": {
+            "pre_run_sync": pre_run_sync,
             "stage1_prefilter": {
                 "input_universe_size": len(tickers),
                 "strategy": selected_strategy,
@@ -732,3 +917,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

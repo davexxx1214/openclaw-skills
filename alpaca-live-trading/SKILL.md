@@ -68,19 +68,27 @@ risk:
 
 默认流程（独立 Skill，不依赖 MCP）：
 
-1. **先同步默认股票池到 SQLite（默认自动执行）**  
-   - 运行 `run_analysis_trade_pipeline.py` 时会先自动同步默认股票池（NASDAQ 100 + QQQ，共 101 只）  
+1. **先同步价格数据到 SQLite（默认自动执行）**  
+   - 运行 `run_analysis_trade_pipeline.py` 时会先自动同步默认股票池（NASDAQ 100 + QQQ），并补齐本次分析用到的 benchmark 行情  
    - 若本地不存在历史数据：自动全量同步（`outputsize=full`）  
    - 若本地已有历史数据：自动增量同步（`outputsize=compact`，必要时 fallback full）  
    - 如需跳过可传 `--skip-default-pool-sync`（不建议）  
-2. 读取历史记录：`position.jsonl` + `balance.jsonl`
-3. 第一阶段（101 -> TopK）：  
-   - 基于策略（如 `w_bottom_breakout`）在本地 SQLite 日线数据上做预筛选
-4. 第二阶段（深度分析）：  
+2. **再刷新 SQLite fundamentals（默认自动执行）**  
+   - pipeline 会检查本次分析股票的 `fundamentals_overview_daily` 与 `fundamentals_quarterly`  
+   - 默认当 overview 快照超过 `7` 天，或季度财务记录不足时，自动补拉并写回 SQLite  
+   - 这一步会直接影响 `autoresearch_trend` 的 `quality_score`  
+   - 如需跳过可传 `--skip-fundamentals-sync`；阈值可用 `--fundamentals-stale-days` 调整  
+3. **再刷新 Alpaca 账户/持仓快照（默认自动执行）**  
+   - pipeline 会在分析前主动拉取 Alpaca 账户与持仓，并追加写入 `position.jsonl` / `balance.jsonl`  
+   - 如果 Alpaca 暂时不可用，会回退读取本地 JSONL 快照继续分析  
+   - 如需跳过可传 `--skip-account-refresh`
+4. 第一阶段（Universe -> TopK）：  
+   - 基于策略（如 `autoresearch_trend` / `w_bottom_breakout`）在本地 SQLite 日线数据上做预筛选
+5. 第二阶段（深度分析）：  
    - 对第一阶段候选 + `QQQ` + `SPY` 做深度分析  
    - 包含：基本面、新闻情绪、Polymarket 赔率、Alpaca 行情 + SQLite 技术面
-5. 市场门控：使用 `QQQ/SPY` 与 Polymarket 信号判断是否允许执行交易
-6. 若门控通过则执行交易（可选），并更新 `position.jsonl` + `balance.jsonl`
+6. 市场门控：使用 `QQQ/SPY` 与 Polymarket 信号判断是否允许执行交易
+7. 若门控通过则执行交易（可选），并更新 `position.jsonl` + `balance.jsonl`
 
 ```bash
 # 默认：pipeline 内部会先自动同步 101 股票池，再执行分析
@@ -109,6 +117,9 @@ python ./scripts/run_analysis_trade_pipeline.py \
 - `--benchmark-tickers`：市场门控基准（默认 `QQQ,SPY`）
 - `--market-gate-threshold`：门控阈值，低于阈值则阻止交易执行（默认 `-0.05`）
 - `--skip-default-pool-sync`：跳过分析前默认101池同步（不建议）
+- `--skip-fundamentals-sync`：跳过分析前 SQLite fundamentals 刷新（会让 `quality_score` 可能使用旧数据）
+- `--fundamentals-stale-days`：控制 fundamentals 多久算过期，默认 `7`
+- `--skip-account-refresh`：跳过分析前 Alpaca 账户/持仓快照刷新（会回退到本地 JSONL）
 - `--skip-market-snapshot`：跳过实时行情快照拉取（会弱化技术面信号）
 
 ## 定时任务与日志（后台运行推荐）
@@ -166,7 +177,9 @@ python ./scripts/run_analysis_trade_pipeline.py
 python ./scripts/run_analysis_trade_pipeline.py --execute-trades
 ```
 
-输出 JSON 中新增字段（`trade_execution` 下）：
+输出 JSON 中新增字段：
+- `pipeline.pre_run_sync`
+  - 记录分析前价格同步、fundamentals 刷新、账户快照刷新的实际状态
 - `strategy_config` / `risk_config`
 - `generated_trade_plan`
 - `strategy_decisions`
@@ -343,6 +356,8 @@ python ./scripts/query_alpaca_account.py --orders
 # 以 JSON 格式输出
 python ./scripts/query_alpaca_account.py --json
 ```
+
+> 说明：该脚本现在不仅会读取 Alpaca 账户，还会把最新账户/持仓快照追加写入本地 `position.jsonl` 与 `balance.jsonl`，供 pipeline 与风控直接复用。
 
 **输出示例：**
 ```

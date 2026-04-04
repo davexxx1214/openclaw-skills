@@ -30,7 +30,7 @@ try:
     ALPACA_AVAILABLE = True
 except ImportError:
     ALPACA_AVAILABLE = False
-    print("⚠️ alpaca-py 未安装，请运行: pip install alpaca-py")
+    print("WARNING: alpaca-py not installed. Run: pip install alpaca-py")
 
 try:
     from zoneinfo import ZoneInfo
@@ -62,6 +62,26 @@ def append_jsonl(path: Path, row: Dict[str, Any]) -> None:
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+def get_next_record_id(path: Path) -> int:
+    if not path.exists():
+        return 1
+    current = 0
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            try:
+                current = max(current, int(row.get("id", 0)))
+            except Exception:
+                continue
+    return current + 1
+
+
 def build_position_snapshot(positions: List[Dict[str, Any]], cash: float) -> Dict[str, Any]:
     snapshot: Dict[str, Any] = {"CASH": float(cash)}
     for pos in positions:
@@ -75,6 +95,75 @@ def build_position_snapshot(positions: List[Dict[str, Any]], cash: float) -> Dic
         if abs(qty) > 0:
             snapshot[symbol] = qty
     return snapshot
+
+
+def persist_account_snapshot(
+    account: Dict[str, Any],
+    positions: List[Dict[str, Any]],
+    *,
+    source: str = "query_alpaca_account",
+    action: str = "refresh_snapshot",
+) -> Dict[str, Any]:
+    """
+    将最新账户/持仓快照追加到本地记录文件，供分析、风控和审计复用。
+    """
+    base_dir = resolve_skill_data_dir()
+    position_file = base_dir / "position" / "position.jsonl"
+    balance_file = base_dir / "balance" / "balance.jsonl"
+    created: List[str] = []
+    if not position_file.exists():
+        created.append(str(position_file))
+    if not balance_file.exists():
+        created.append(str(balance_file))
+
+    ts = get_now_timestamps()
+    next_id = get_next_record_id(position_file)
+    append_jsonl(
+        position_file,
+        {
+            "date": ts["date"],
+            "timestamp_et": ts["timestamp_et"],
+            "timestamp_utc": ts["timestamp_utc"],
+            "id": next_id,
+            "this_action": {
+                "action": action,
+                "symbol": "N/A",
+                "amount": 0,
+                "price": None,
+                "order_type": "snapshot",
+                "order_status": "snapshot",
+                "source": source,
+                "order_id": "",
+            },
+            "positions": build_position_snapshot(positions, account.get("cash", 0.0)),
+        },
+    )
+    append_jsonl(
+        balance_file,
+        {
+            "date": ts["date"],
+            "timestamp_et": ts["timestamp_et"],
+            "timestamp_utc": ts["timestamp_utc"],
+            "trade": {
+                "action": action,
+                "symbol": "N/A",
+                "qty": 0,
+                "order_type": "snapshot",
+                "order_status": "snapshot",
+                "filled_price": None,
+                "order_id": "",
+                "source": source,
+            },
+            "account": account,
+            "positions": positions,
+        },
+    )
+    return {
+        "position_file": str(position_file),
+        "balance_file": str(balance_file),
+        "created_files": created,
+        "position_record_id": next_id,
+    }
 
 
 def ensure_local_record_files(account: Dict[str, Any], positions: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -294,7 +383,12 @@ def main():
         account = get_account_info(client)
         # 获取持仓（用于输出 + 初始化本地文件）
         positions = get_positions(client)
-        init_result = ensure_local_record_files(account, positions)
+        init_result = persist_account_snapshot(
+            account,
+            positions,
+            source="query_alpaca_account",
+            action="account_snapshot",
+        )
 
         if args.json:
             output = {"account": account}
