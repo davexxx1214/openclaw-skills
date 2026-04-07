@@ -52,6 +52,12 @@ strategy:
   min_confidence: 0.6
   prefilter_top_k: 10
 
+market_gate:
+  benchmark_tickers:
+    - QQQ
+    - SPY
+  threshold: -0.05
+
 risk:
   max_position_pct: 0.1
   max_positions: 5
@@ -114,8 +120,8 @@ python ./scripts/run_analysis_trade_pipeline.py \
 常用参数说明：
 
 - `--prefilter-top-k`：第一阶段筛选数量（默认 10）
-- `--benchmark-tickers`：市场门控基准（默认 `QQQ,SPY`）
-- `--market-gate-threshold`：门控阈值，低于阈值则阻止交易执行（默认 `-0.05`）
+- `--benchmark-tickers`：市场门控基准；默认读取 `config.yaml -> market_gate.benchmark_tickers`
+- `--market-gate-threshold`：门控阈值；默认读取 `config.yaml -> market_gate.threshold`
 - `--skip-default-pool-sync`：跳过分析前默认101池同步（不建议）
 - `--skip-fundamentals-sync`：跳过分析前 SQLite fundamentals 刷新（会让 `quality_score` 可能使用旧数据）
 - `--fundamentals-stale-days`：控制 fundamentals 多久算过期，默认 `7`
@@ -178,6 +184,8 @@ python ./scripts/run_analysis_trade_pipeline.py --execute-trades
 ```
 
 输出 JSON 中新增字段：
+- `pipeline.market_gate_config`
+  - 记录本次运行实际生效的 market gate 配置
 - `pipeline.pre_run_sync`
   - 记录分析前价格同步、fundamentals 刷新、账户快照刷新的实际状态
 - `strategy_config` / `risk_config`
@@ -185,6 +193,44 @@ python ./scripts/run_analysis_trade_pipeline.py --execute-trades
 - `strategy_decisions`
 - `risk_rejections`
 - `trade_plan_source`（`strategy_auto` 或 `manual_file`）
+
+`analysis_pipeline_latest.json` 里最常看的结构示例：
+
+```json
+{
+  "pipeline": {
+    "market_gate_config": {
+      "benchmark_tickers": ["QQQ", "SPY"],
+      "threshold": -0.05
+    },
+    "pre_run_sync": {
+      "daily_prices": {"status": "ok"},
+      "fundamentals": {"status": "already_fresh"},
+      "account_snapshot": {"status": "ok", "positions_count": 0}
+    },
+    "market_gate": {
+      "benchmark_news_signal": 0.08,
+      "polymarket_signal": -0.12,
+      "market_gate_score": -0.02,
+      "threshold": -0.05,
+      "should_trade": true
+    }
+  },
+  "trade_execution": {
+    "strategy_config": {"name": "autoresearch_trend"},
+    "risk_config": {"max_position_pct": 0.1, "max_positions": 6, "max_trade_notional": 10000},
+    "generated_trade_plan": [{"action": "buy", "symbol": "ODFL", "qty": 22}],
+    "risk_rejections": [],
+    "trade_results": []
+  }
+}
+```
+
+- `market_gate_config`：确认本次到底用了哪组 benchmark 和 threshold
+- `pre_run_sync`：确认分析前的数据同步是否成功
+- `market_gate`：确认是不是被市场门控拦住了
+- `generated_trade_plan`：确认最终计划单长什么样
+- `trade_results`：只有带 `--execute-trades` 时才会产生真实执行结果
 
 ## 交易执行与记录规则（重要）
 

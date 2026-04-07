@@ -205,6 +205,12 @@ strategy:
   name: w_bottom_breakout
   min_confidence: 0.6
   prefilter_top_k: 10
+
+market_gate:
+  benchmark_tickers:
+    - QQQ
+    - SPY
+  threshold: -0.05
 ```
 
 运行：
@@ -219,7 +225,10 @@ python scripts/run_analysis_trade_pipeline.py --execute-trades
 
 ### 二阶段会收集哪些数据
 
-第二阶段分析池为：`第一阶段候选 + benchmark_tickers(默认 QQQ,SPY)`。
+第二阶段分析池为：`第一阶段候选 + benchmark_tickers`。
+
+- 默认从 `config.yaml -> market_gate.benchmark_tickers` 读取
+- 若命令行显式传入 `--benchmark-tickers`，则以命令行为准
 
 - AlphaVantage 新闻情绪：`fetch_news_per_ticker`（每只默认 5 条，可通过 `--news-limit` 调整）
 - AlphaVantage 基本面：`fetch_fundamentals_for_symbol`（`OVERVIEW / INCOME_STATEMENT / BALANCE_SHEET / CASH_FLOW / EARNINGS`）
@@ -230,6 +239,62 @@ python scripts/run_analysis_trade_pipeline.py --execute-trades
 > 说明：当前实现中二阶段仍然会采集 AlphaVantage 与 Polymarket 信息，结果写入
 > `skills/alpaca-live-trading/data/analysis_pipeline_latest.json` 的
 > `alpha_vantage.*` 与 `polymarket_sentiment` 字段。
+
+### `analysis_pipeline_latest.json` 关键结构
+
+典型输出可重点看这几个块：
+
+```json
+{
+  "generated_at": "2026-04-07 14:04:00",
+  "pipeline": {
+    "market_gate_config": {
+      "benchmark_tickers": ["QQQ", "SPY"],
+      "threshold": -0.05
+    },
+    "pre_run_sync": {
+      "daily_prices": {"status": "ok", "symbols": ["QQQ", "SPY", "ODFL"]},
+      "fundamentals": {"status": "already_fresh", "symbols": []},
+      "account_snapshot": {"status": "ok", "positions_count": 0}
+    },
+    "stage1_prefilter": {
+      "strategy": "autoresearch_trend",
+      "candidates": ["ODFL"]
+    },
+    "market_gate": {
+      "benchmark_news_signal": 0.08,
+      "polymarket_signal": -0.12,
+      "market_gate_score": -0.02,
+      "threshold": -0.05,
+      "should_trade": true
+    }
+  },
+  "trade_execution": {
+    "strategy_config": {
+      "name": "autoresearch_trend",
+      "min_confidence": 0.6
+    },
+    "risk_config": {
+      "max_position_pct": 0.1,
+      "max_positions": 6,
+      "max_trade_notional": 10000
+    },
+    "generated_trade_plan": [
+      {"action": "buy", "symbol": "ODFL", "qty": 22}
+    ],
+    "risk_rejections": [],
+    "trade_results": []
+  }
+}
+```
+
+说明：
+
+- `pipeline.market_gate_config`：本次运行实际采用的门控配置
+- `pipeline.pre_run_sync`：分析前数据准备是否成功，便于排查“为什么这次信号异常”
+- `pipeline.market_gate`：门控评分、阈值和最终是否允许交易
+- `trade_execution.generated_trade_plan`：策略和风控通过后的计划单
+- `trade_execution.trade_results`：只有带 `--execute-trades` 时才会出现真实执行结果
 
 ### 二阶段如何决定“是否交易、怎么交易”
 
@@ -262,7 +327,9 @@ python scripts/run_analysis_trade_pipeline.py --execute-trades
 6) 是否实际下单  
 
 - 仅当命令包含 `--execute-trades` 时才会执行
-- 且需通过市场门控：`market_gate_score >= market_gate_threshold`（默认阈值 `-0.05`）
+- 且需通过市场门控：`market_gate_score >= market_gate_threshold`
+- 默认阈值读取 `config.yaml -> market_gate.threshold`
+- 若命令行显式传入 `--market-gate-threshold`，则以命令行为准
 - 不满足时会保留分析与计划结果，但不会实际下单
 
 ## 后续可扩展方向

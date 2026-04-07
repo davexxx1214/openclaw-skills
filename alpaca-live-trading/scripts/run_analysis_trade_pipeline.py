@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Optional, Tuple
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from _config import get_risk_config, get_strategy_config, load_config
+from _config import get_market_gate_config, get_risk_config, get_strategy_config, load_config
 from order_builder import build_trade_plan
 from query_alpaca_account import (
     get_account_info,
@@ -494,6 +494,7 @@ def main() -> None:
     config = load_config()
     strategy_config = get_strategy_config(config)
     risk_config = get_risk_config(config)
+    market_gate_config = get_market_gate_config(config)
 
     parser = argparse.ArgumentParser(description="运行 Alpaca 分析+交易一体化流程")
     parser.add_argument(
@@ -508,13 +509,13 @@ def main() -> None:
     parser.add_argument(
         "--benchmark-tickers",
         type=str,
-        default="QQQ,SPY",
+        default=",".join(market_gate_config.get("benchmark_tickers", ["QQQ", "SPY"])),
         help="第二阶段市场门控基准代码，默认 QQQ,SPY",
     )
     parser.add_argument(
         "--market-gate-threshold",
         type=float,
-        default=-0.05,
+        default=float(market_gate_config.get("threshold", -0.05)),
         help="市场门控阈值，低于该值不执行交易，默认 -0.05",
     )
     parser.add_argument(
@@ -847,6 +848,7 @@ def main() -> None:
         "tickers_count": len(tickers),
         "tickers": tickers,
         "pipeline": {
+            "market_gate_config": market_gate_config,
             "pre_run_sync": pre_run_sync,
             "stage1_prefilter": {
                 "input_universe_size": len(tickers),

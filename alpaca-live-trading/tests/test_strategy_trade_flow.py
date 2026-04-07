@@ -9,7 +9,7 @@ from unittest.mock import patch
 SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from _config import get_risk_config, get_strategy_config  # noqa: E402
+from _config import get_market_gate_config, get_risk_config, get_strategy_config  # noqa: E402
 from order_builder import build_trade_plan  # noqa: E402
 from query_alpaca_account import persist_account_snapshot  # noqa: E402
 from risk_guard import apply_risk_guard  # noqa: E402
@@ -30,6 +30,16 @@ class ConfigParsingTests(unittest.TestCase):
         self.assertGreaterEqual(parsed["max_position_pct"], 0.0)
         self.assertGreaterEqual(parsed["max_positions"], 1)
         self.assertGreaterEqual(parsed["max_trade_notional"], 0.0)
+
+    def test_market_gate_config_defaults_and_parsing(self):
+        parsed = get_market_gate_config({})
+        self.assertEqual(parsed["benchmark_tickers"], ["QQQ", "SPY"])
+        self.assertEqual(parsed["threshold"], -0.05)
+
+        cfg = {"market_gate": {"benchmark_tickers": "spy, qqq, dia", "threshold": "0.1"}}
+        parsed = get_market_gate_config(cfg)
+        self.assertEqual(parsed["benchmark_tickers"], ["SPY", "QQQ", "DIA"])
+        self.assertEqual(parsed["threshold"], 0.1)
 
 
 class StrategyEngineTests(unittest.TestCase):

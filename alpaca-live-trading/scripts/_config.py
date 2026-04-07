@@ -36,6 +36,10 @@ DEFAULT_RISK_CONFIG: Dict[str, Any] = {
     "max_positions": 5,
     "max_trade_notional": 2000.0,
 }
+DEFAULT_MARKET_GATE_CONFIG: Dict[str, Any] = {
+    "benchmark_tickers": ["QQQ", "SPY"],
+    "threshold": -0.05,
+}
 
 
 def load_config(config_path: Path = None) -> Dict[str, Any]:
@@ -188,4 +192,37 @@ def get_risk_config(config: Dict[str, Any] = None) -> Dict[str, Any]:
         "max_position_pct": _clamp(max_position_pct, 0.0, 1.0),
         "max_positions": max(max_positions, 1),
         "max_trade_notional": max(max_trade_notional, 0.0),
+    }
+
+
+def get_market_gate_config(config: Dict[str, Any] = None) -> Dict[str, Any]:
+    """
+    获取市场门控配置，带默认值和基础校验。
+    """
+    if config is None:
+        config = load_config()
+
+    raw = config.get("market_gate", {}) if isinstance(config, dict) else {}
+    if not isinstance(raw, dict):
+        raw = {}
+
+    benchmark_tickers = raw.get("benchmark_tickers", DEFAULT_MARKET_GATE_CONFIG["benchmark_tickers"])
+    if isinstance(benchmark_tickers, str):
+        benchmark_tickers = [x.strip().upper() for x in benchmark_tickers.split(",") if x.strip()]
+    elif isinstance(benchmark_tickers, list):
+        benchmark_tickers = [str(x).strip().upper() for x in benchmark_tickers if str(x).strip()]
+    else:
+        benchmark_tickers = list(DEFAULT_MARKET_GATE_CONFIG["benchmark_tickers"])
+
+    if not benchmark_tickers:
+        benchmark_tickers = list(DEFAULT_MARKET_GATE_CONFIG["benchmark_tickers"])
+
+    try:
+        threshold = float(raw.get("threshold", DEFAULT_MARKET_GATE_CONFIG["threshold"]))
+    except (TypeError, ValueError):
+        threshold = float(DEFAULT_MARKET_GATE_CONFIG["threshold"])
+
+    return {
+        "benchmark_tickers": benchmark_tickers,
+        "threshold": _clamp(threshold, -1.0, 1.0),
     }

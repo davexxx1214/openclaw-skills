@@ -33,6 +33,15 @@ strategy:
   # 第一轮策略预筛选保留数量
   prefilter_top_k: 10
 
+# 市场门控配置
+market_gate:
+  # 用于市场环境判定的 benchmark tickers
+  benchmark_tickers:
+    - QQQ
+    - SPY
+  # 综合门控阈值，低于该值则阻止执行交易
+  threshold: -0.05
+
 # 基础风控配置
 risk:
   # 单只标的最大仓位占账户现金比例（0-1）
